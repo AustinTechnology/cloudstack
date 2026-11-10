@@ -261,3 +261,5 @@ INSERT INTO cloud.role_permissions (uuid, role_id, rule, permission, sort_order)
 SELECT uuid(), role_id, 'importLdapUsers', permission, sort_order
 FROM cloud.role_permissions rp
 WHERE rule = 'createAccount' AND NOT EXISTS(SELECT 1 FROM cloud.role_permissions rp_ WHERE rp.role_id = rp_.role_id AND rp_.rule = 'importLdapUsers');
+
+CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.disk_offering', 'error_policy', 'VARCHAR(16) DEFAULT ''report'' COMMENT ''disk error policy (report/stop/ignore/enospace) used by KVM hypervisor''');
