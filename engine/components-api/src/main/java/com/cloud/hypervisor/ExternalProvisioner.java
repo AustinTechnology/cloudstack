@@ -18,8 +18,12 @@ package com.cloud.hypervisor;
 
 import java.util.Map;
 
+import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.CheckVirtualMachineAnswer;
+import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
+import com.cloud.agent.api.GetVmIpAddressCommand;
 import com.cloud.agent.api.HostVmStateReportEntry;
 import com.cloud.agent.api.PrepareExternalProvisioningAnswer;
 import com.cloud.agent.api.PrepareExternalProvisioningCommand;
@@ -62,4 +66,8 @@ public interface ExternalProvisioner extends Manager {
     GetExternalConsoleAnswer getInstanceConsole(String hostGuid, String extensionName, String extensionRelativePath, GetExternalConsoleCommand cmd);
 
     RunCustomActionAnswer runCustomAction(String hostGuid, String extensionName, String extensionRelativePath, RunCustomActionCommand cmd);
+
+    CheckVirtualMachineAnswer checkInstance(String hostGuid, String extensionName, String extensionRelativePath, CheckVirtualMachineCommand cmd);
+
+    Answer getInstanceIpAddress(String hostGuid, String extensionName, String extensionRelativePath, GetVmIpAddressCommand cmd);
 }

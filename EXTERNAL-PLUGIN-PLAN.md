@@ -86,9 +86,18 @@ Ordered so that each step is useful on its own and the early ones change Externa
 
 Everything in the HA model depends on this: when Proxmox HA or an operator moves a VM, CloudStack has to record the new host by itself.
 
-- **Lab observation, 12 Nov 2026:** on unmodified 4.23.0.0, a running VM live-migrated in Proxmox was shown on its new host by CloudStack within about two minutes, with no patch. So the running-VM case may already work. Not yet tested: a stopped VM that is moved, and a VM restarted on another node by Proxmox HA.
-- Read how `host_id` is updated from power reports for External VMs (`VirtualMachinePowerStateSyncImpl`, `updatePowerState`) and what `trackVmHostChange()` gates. This was not traced for this plan.
-- Then either return `true` from `ExternalHypervisorGuru.trackVmHostChange()` or make the smallest change that lets CloudStack record the new host when a VM is reported from a different one.
+**Result, 12 Nov 2026: no Java change is needed.** Tested in the lab on unmodified 4.23.0.0 with the AustinTechnology extension:
+
+| Case | Result |
+|---|---|
+| Running VM live-migrated in Proxmox | CloudStack showed the new host within 2 to 4 minutes |
+| Stopped VM moved in Proxmox, then started from CloudStack | Started on the node it was really on; CloudStack showed that host about 90 seconds later |
+| Node killed, Proxmox HA restarted the VM on the other node | Proxmox recovered the VM in about 2 minutes; CloudStack showed the new host on its next power report and started nothing itself |
+
+- Why it works: each host's power report lists the VMs on that node, `VMInstanceDaoImpl.updatePowerState` records which host reported the VM, and `handlePowerOnReportWithNoPendingJobsOnVM` moves a Running VM to that host ("Detected out of band VM migration"). Nothing in 4.23.0.0 calls `trackVmHostChange()`, so its return value changes nothing.
+- This depends on the extension's `statuses` action listing VMs per node, and on its live-node lookup for start, stop and console.
+- During the node loss CloudStack kept showing the dead host as Up, because an External host has no agent of its own to lose. Step 4 has to account for that.
+- The lab cluster was given a third quorum vote (a qdevice on the management VM) for the HA test.
 
 Validation: migrate a test VM between Proxmox nodes, and separately let Proxmox HA recover one from a fenced node, and confirm CloudStack shows the new host and Running with no manual step.
 
@@ -101,6 +110,15 @@ Files: `ExternalResource.java`, `ExternalPathPayloadProvisioner.java`, their exi
 - `CheckVirtualMachineCommand`: reuse the script's existing `status` action and return a `CheckVirtualMachineAnswer` with the power state.
 - `GetVmIpAddressCommand`: add a script action that returns the guest-agent IPv4 address for the given MAC, ignoring loopback and link-local addresses. Return success with no address when the agent has none, and failure when the agent is unreachable, so CloudStack does not blank a known IP because an agent is down.
 - Change the fallback to return "unsupported" without invoking the script. A payload with no VM in it cannot be answered correctly.
+
+**Status, 12 Nov 2026: built and running in the lab; not reviewed, not in production.**
+
+- The change also adds two methods to the `ExternalProvisioner` interface in `engine/components-api`, so it is not plugin classes only. That class is in the same server jar.
+- The script action is `getipaddress`. It receives the NIC's MAC and the network CIDR as parameters and prefers an address inside that CIDR.
+- Unit tests: 114 pass (103 before the change).
+- Lab: CloudStack filled in the NIC address (10.100.0.5) from the guest agent on its next poll, with no sync tool in the lab. With no guest agent the action fails and the stored address is left alone.
+- Since the new jar was started there are no `Missing required fields` lines and no unsupported-command lines in the lab log.
+- Not exercised live: `CheckVirtualMachineCommand`. CloudStack only sends it during HA investigation and migration checks, which step 4 covers.
 
 Validation:
 - Unit tests for both handlers and the fallback.

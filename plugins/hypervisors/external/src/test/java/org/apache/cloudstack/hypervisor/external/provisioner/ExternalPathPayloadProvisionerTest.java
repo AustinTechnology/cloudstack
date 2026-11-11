@@ -65,8 +65,12 @@ import org.mockito.Spy;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.CheckVirtualMachineAnswer;
+import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
+import com.cloud.agent.api.GetVmIpAddressCommand;
 import com.cloud.agent.api.HostVmStateReportEntry;
 import com.cloud.agent.api.PrepareExternalProvisioningAnswer;
 import com.cloud.agent.api.PrepareExternalProvisioningCommand;
@@ -91,10 +95,12 @@ import com.cloud.utils.Pair;
 import com.cloud.utils.PropertiesUtil;
 import com.cloud.utils.script.Script;
 import com.cloud.vm.UserVmVO;
+import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.VmDetailConstants;
 import com.cloud.vm.dao.UserVmDao;
+import com.cloud.vm.dao.VMInstanceDao;
 
 @RunWith(MockitoJUnitRunner.class)
 public class ExternalPathPayloadProvisionerTest {
@@ -105,6 +111,9 @@ public class ExternalPathPayloadProvisionerTest {
 
     @Mock
     private UserVmDao userVmDao;
+
+    @Mock
+    private VMInstanceDao vmInstanceDao;
 
     @Mock
     private HostDao hostDao;
@@ -1133,5 +1142,90 @@ public class ExternalPathPayloadProvisionerTest {
 
         assertFalse(result.first());
         assertEquals("File not found", result.second());
+    }
+
+    private UserVmVO mockInstanceOnHost(String instanceName) {
+        HostVO host = mock(HostVO.class);
+        when(hostDao.findByGuid("External:guid")).thenReturn(host);
+        VMInstanceVO instance = mock(VMInstanceVO.class);
+        when(instance.getId()).thenReturn(7L);
+        when(vmInstanceDao.findVMByInstanceName(instanceName)).thenReturn(instance);
+        UserVmVO userVm = mock(UserVmVO.class);
+        when(userVmDao.findById(7L)).thenReturn(userVm);
+        when(extensionsManager.getExternalAccessDetails(host, null)).thenReturn(new HashMap<>());
+        return userVm;
+    }
+
+    @Test
+    public void checkInstanceReturnsThePowerStateOfTheInstance() {
+        UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
+        doReturn(VirtualMachine.PowerState.PowerOff).when(provisioner)
+                .getVmPowerState(eq(userVm), anyMap(), eq("test-extension"), anyString());
+
+        CheckVirtualMachineAnswer answer = provisioner.checkInstance("External:guid", "test-extension",
+                "test-extension.sh", new CheckVirtualMachineCommand("i-2-1-VM"));
+
+        assertTrue(answer.getResult());
+        assertEquals(VirtualMachine.PowerState.PowerOff, answer.getState());
+    }
+
+    @Test
+    public void checkInstanceFailsWhenThePowerStateIsUnknown() {
+        UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
+        doReturn(VirtualMachine.PowerState.PowerUnknown).when(provisioner)
+                .getVmPowerState(eq(userVm), anyMap(), eq("test-extension"), anyString());
+
+        CheckVirtualMachineAnswer answer = provisioner.checkInstance("External:guid", "test-extension",
+                "test-extension.sh", new CheckVirtualMachineCommand("i-2-1-VM"));
+
+        assertFalse(answer.getResult());
+    }
+
+    @Test
+    public void checkInstanceFailsWhenTheInstanceIsNotFound() {
+        when(vmInstanceDao.findVMByInstanceName("i-2-9-VM")).thenReturn(null);
+
+        CheckVirtualMachineAnswer answer = provisioner.checkInstance("External:guid", "test-extension",
+                "test-extension.sh", new CheckVirtualMachineCommand("i-2-9-VM"));
+
+        assertFalse(answer.getResult());
+    }
+
+    private Answer getIpAddressWithScriptResult(Pair<Boolean, String> scriptResult) {
+        UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
+        VirtualMachineTO vmTO = mock(VirtualMachineTO.class);
+        doReturn(vmTO).when(provisioner).getVirtualMachineTO(userVm);
+        doReturn(scriptResult).when(provisioner)
+                .executeExternalCommand(eq("test-extension"), eq("getipaddress"), anyMap(), anyInt(), anyString(), anyString());
+        return provisioner.getInstanceIpAddress("External:guid", "test-extension", "test-extension.sh",
+                new GetVmIpAddressCommand("i-2-1-VM", "10.0.0.0/24", false, "02:00:00:00:00:01"));
+    }
+
+    @Test
+    public void getInstanceIpAddressReturnsTheAddressFromTheExternalSystem() {
+        Answer answer = getIpAddressWithScriptResult(
+                new Pair<>(true, "{\"status\":\"success\",\"ip_address\":\"10.0.0.5\"}"));
+        assertTrue(answer.getResult());
+        assertEquals("10.0.0.5", answer.getDetails());
+    }
+
+    @Test
+    public void getInstanceIpAddressSucceedsWithNoAddressWhenTheInstanceHasNone() {
+        Answer answer = getIpAddressWithScriptResult(new Pair<>(true, "{\"status\":\"success\",\"ip_address\":\"\"}"));
+        assertTrue(answer.getResult());
+        assertNull(answer.getDetails());
+    }
+
+    @Test
+    public void getInstanceIpAddressFailsWhenTheExternalSystemFails() {
+        Answer answer = getIpAddressWithScriptResult(new Pair<>(false, "guest agent is not running"));
+        assertFalse(answer.getResult());
+    }
+
+    @Test
+    public void getInstanceIpAddressFailsOnAnInvalidAddress() {
+        Answer answer = getIpAddressWithScriptResult(
+                new Pair<>(true, "{\"status\":\"success\",\"ip_address\":\"not-an-ip\"}"));
+        assertFalse(answer.getResult());
     }
 }

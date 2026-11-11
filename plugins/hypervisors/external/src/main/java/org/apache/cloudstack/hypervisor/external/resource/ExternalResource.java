@@ -33,12 +33,15 @@ import com.cloud.agent.api.CheckHealthAnswer;
 import com.cloud.agent.api.CheckHealthCommand;
 import com.cloud.agent.api.CheckNetworkAnswer;
 import com.cloud.agent.api.CheckNetworkCommand;
+import com.cloud.agent.api.CheckVirtualMachineAnswer;
+import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.CleanupNetworkRulesCmd;
 import com.cloud.agent.api.Command;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
 import com.cloud.agent.api.GetHostStatsAnswer;
 import com.cloud.agent.api.GetHostStatsCommand;
+import com.cloud.agent.api.GetVmIpAddressCommand;
 import com.cloud.agent.api.GetVmStatsCommand;
 import com.cloud.agent.api.HostVmStateReportEntry;
 import com.cloud.agent.api.MaintainAnswer;
@@ -172,6 +175,10 @@ public class ExternalResource implements ServerResource {
                 return execute((GetHostStatsCommand) cmd);
             } else if (cmd instanceof RunCustomActionCommand) {
                 return execute((RunCustomActionCommand) cmd);
+            } else if (cmd instanceof CheckVirtualMachineCommand) {
+                return execute((CheckVirtualMachineCommand) cmd);
+            } else if (cmd instanceof GetVmIpAddressCommand) {
+                return execute((GetVmIpAddressCommand) cmd);
             } else {
                 return execute(cmd);
             }
@@ -298,14 +305,26 @@ public class ExternalResource implements ServerResource {
         return externalProvisioner.runCustomAction(guid, extensionName, extensionRelativePath, cmd);
     }
 
+    public CheckVirtualMachineAnswer execute(CheckVirtualMachineCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return new CheckVirtualMachineAnswer(cmd, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        return externalProvisioner.checkInstance(guid, extensionName, extensionRelativePath, cmd);
+    }
+
+    public Answer execute(GetVmIpAddressCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        return externalProvisioner.getInstanceIpAddress(guid, extensionName, extensionRelativePath, cmd);
+    }
+
     public Answer execute(Command cmd) {
         if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
             return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
         }
-        RunCustomActionCommand runCustomActionCommand = new RunCustomActionCommand(cmd.toString());
-        RunCustomActionAnswer customActionAnswer = externalProvisioner.runCustomAction(guid, extensionName,
-                extensionRelativePath, runCustomActionCommand);
-        return new Answer(cmd, customActionAnswer.getResult(), customActionAnswer.getDetails());
+        // A command without a handler carries nothing the extension could act on, so it is not passed on.
+        return Answer.createUnsupportedCommandAnswer(cmd);
     }
 
     @Override
