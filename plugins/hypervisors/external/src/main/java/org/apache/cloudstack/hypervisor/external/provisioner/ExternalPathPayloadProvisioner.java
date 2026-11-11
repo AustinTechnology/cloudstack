@@ -57,8 +57,12 @@ import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.ObjectUtils;
 
 import com.cloud.agent.AgentManager;
+import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.CheckVirtualMachineAnswer;
+import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
+import com.cloud.agent.api.GetVmIpAddressCommand;
 import com.cloud.agent.api.HostVmStateReportEntry;
 import com.cloud.agent.api.PrepareExternalProvisioningAnswer;
 import com.cloud.agent.api.PrepareExternalProvisioningCommand;
@@ -87,13 +91,16 @@ import com.cloud.utils.component.ManagerBase;
 import com.cloud.utils.component.PluggableService;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.json.JsonMergeUtil;
+import com.cloud.utils.net.NetUtils;
 import com.cloud.utils.script.Script;
 import com.cloud.vm.UserVmVO;
+import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.VirtualMachineProfileImpl;
 import com.cloud.vm.VmDetailConstants;
 import com.cloud.vm.dao.UserVmDao;
+import com.cloud.vm.dao.VMInstanceDao;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -115,6 +122,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     UserVmDao _uservmDao;
 
     @Inject
+    VMInstanceDao vmInstanceDao;
+
+    @Inject
     HostDao hostDao;
 
     @Inject
@@ -129,7 +139,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     private ExecutorService payloadCleanupExecutor;
     private ScheduledExecutorService payloadCleanupScheduler;
     private static final List<String> TRIVIAL_ACTIONS = Arrays.asList(
-            "status", "statuses"
+            "status", "statuses", "getipaddress"
     );
 
     @Override
@@ -555,6 +565,94 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         Pair<Boolean, String> result = runCustomActionOnExternalSystem(extensionName, extensionPath,
                 actionName, accessDetails, cmd.getWait());
         return new RunCustomActionAnswer(cmd, result.first(), result.second());
+    }
+
+    protected UserVmVO getUserVmByInstanceName(String instanceName) {
+        VMInstanceVO instance = vmInstanceDao.findVMByInstanceName(instanceName);
+        if (instance == null) {
+            return null;
+        }
+        return _uservmDao.findById(instance.getId());
+    }
+
+    @Override
+    public CheckVirtualMachineAnswer checkInstance(String hostGuid, String extensionName,
+                           String extensionRelativePath, CheckVirtualMachineCommand cmd) {
+        String extensionPath = getExtensionCheckedPath(extensionName, extensionRelativePath);
+        if (StringUtils.isEmpty(extensionPath)) {
+            return new CheckVirtualMachineAnswer(cmd, getExtensionConfigureError(extensionName, hostGuid));
+        }
+        HostVO host = hostDao.findByGuid(hostGuid);
+        UserVmVO userVm = getUserVmByInstanceName(cmd.getVmName());
+        if (ObjectUtils.anyNull(host, userVm)) {
+            logger.warn("Unable to check instance {} as the host or the instance is not found", cmd.getVmName());
+            return new CheckVirtualMachineAnswer(cmd, "Host or instance not found");
+        }
+        Map<String, Map<String, String>> accessDetails = extensionsManager.getExternalAccessDetails(host, null);
+        VirtualMachine.PowerState powerState = getVmPowerState(userVm, accessDetails, extensionName, extensionPath);
+        if (VirtualMachine.PowerState.PowerUnknown.equals(powerState)) {
+            return new CheckVirtualMachineAnswer(cmd, "Unable to get the power state from the external system");
+        }
+        return new CheckVirtualMachineAnswer(cmd, powerState, null);
+    }
+
+    @Override
+    public Answer getInstanceIpAddress(String hostGuid, String extensionName, String extensionRelativePath,
+                           GetVmIpAddressCommand cmd) {
+        String extensionPath = getExtensionCheckedPath(extensionName, extensionRelativePath);
+        if (StringUtils.isEmpty(extensionPath)) {
+            return new Answer(cmd, false, getExtensionConfigureError(extensionName, hostGuid));
+        }
+        HostVO host = hostDao.findByGuid(hostGuid);
+        UserVmVO userVm = getUserVmByInstanceName(cmd.getVmName());
+        if (ObjectUtils.anyNull(host, userVm)) {
+            logger.warn("Unable to get the IP address of instance {} as the host or the instance is not found",
+                    cmd.getVmName());
+            return new Answer(cmd, false, "Host or instance not found");
+        }
+        VirtualMachineTO virtualMachineTO = getVirtualMachineTO(userVm);
+        Map<String, Map<String, String>> accessDetails = extensionsManager.getExternalAccessDetails(host, null);
+        accessDetails.put(ApiConstants.VIRTUAL_MACHINE, virtualMachineTO.getExternalDetails());
+        Map<String, Object> modifiedDetails = loadAccessDetails(accessDetails, virtualMachineTO);
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put(ApiConstants.MAC_ADDRESS, cmd.getMacAddress());
+        if (StringUtils.isNotBlank(cmd.getVmNetworkCidr())) {
+            parameters.put(ApiConstants.CIDR, cmd.getVmNetworkCidr());
+        }
+        modifiedDetails.put(ApiConstants.PARAMETERS, parameters);
+        logger.debug("Trying to get the IP address from the external system for {}", userVm);
+        Pair<Boolean, String> result = executeExternalCommand(extensionName, "getipaddress", modifiedDetails,
+                cmd.getWait(), String.format("Failed to get the IP address of instance %s on external system",
+                        userVm.getUuid()), extensionPath);
+        if (!result.first()) {
+            return new Answer(cmd, false, result.second());
+        }
+        return getIpAddressAnswerFromResponse(cmd, result.second());
+    }
+
+    /**
+     * The external system answers with {"status": "success", "ip_address": "..."} or with the bare address.
+     * An empty address means the instance was reached and has no address on that NIC.
+     */
+    protected Answer getIpAddressAnswerFromResponse(GetVmIpAddressCommand cmd, String response) {
+        String ipAddress = StringUtils.trimToNull(response);
+        if (ipAddress != null && ipAddress.startsWith("{")) {
+            try {
+                JsonObject jsonObj = JsonParser.parseString(ipAddress).getAsJsonObject();
+                if (!jsonObj.has("status") || !"success".equalsIgnoreCase(jsonObj.get("status").getAsString())) {
+                    return new Answer(cmd, false, "Failure response received for the IP address");
+                }
+                ipAddress = jsonObj.has("ip_address") && !jsonObj.get("ip_address").isJsonNull() ?
+                        StringUtils.trimToNull(jsonObj.get("ip_address").getAsString()) : null;
+            } catch (RuntimeException e) {
+                logger.warn("Failed to parse the IP address response: {}", e.getMessage());
+                return new Answer(cmd, false, "Failed to parse output");
+            }
+        }
+        if (ipAddress != null && !NetUtils.isValidIp4(ipAddress)) {
+            return new Answer(cmd, false, "Invalid IP address in output");
+        }
+        return new Answer(cmd, true, ipAddress);
     }
 
     protected boolean createExtensionPath(String extensionName, Path destinationPathObj) throws IOException {
