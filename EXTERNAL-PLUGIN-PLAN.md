@@ -62,27 +62,37 @@ Current production state matches the split already: CloudStack HA is off on all 
 
 ## Steps
 
-Ordered so that each step is useful on its own and the early ones change one jar only.
+Ordered so that each step is useful on its own and the early ones change External plugin classes only.
 
-### Step 1: establish build and deploy for one jar
+### Step 1: establish build and deploy (done in the lab, 12 Nov 2026)
 
-- Build a non-production CloudStack 4.23.0.0 with one External (Proxmox) cluster to trial every jar on. None exists today; it is to be built on HV08.
-- Build `cloud-plugin-hypervisor-external` (`plugins/hypervisors/external/pom.xml`) from the branch against 4.23.0.0 and confirm the unmodified build is functionally equivalent to the shipped jar before changing anything.
-- Write down the install and rollback procedure for the jar on P2-ACS-MGMT01. It needs a `cloudstack-management` restart.
-- Validation: unmodified rebuilt jar runs in place of the shipped one with no behaviour change (console canary, power reports).
+**There is no separate plugin jar.** The 4.23 packages ship one server jar, `/usr/share/cloudstack-management/lib/cloudstack-4.23.0.0.jar`, which contains the External plugin classes together with the rest of the management server. The lab and production jars are byte-identical. The 4.23.0.0 artifacts are not on Maven Central, so a single-module Maven build has nothing to resolve against.
 
-**Not yet established:** the jar's install path on the management server.
+**Build method.** Compile the plugin's sources against the shipped jar, then write a copy of the shipped jar with only the plugin's entries replaced. Every other entry keeps its original bytes and order.
 
-### Step 2: follow VMs that the orchestrator moves (plugin jar only)
+- Use JDK 11 to compile; the shipped jar was built with it (`Build-Jdk-Spec: 11`). The management server keeps running on Java 17.
+- Unmodified source rebuilt this way: 14 of 17 plugin entries are byte-identical to the shipped ones. The other 3 classes differ only in how the newer JDK 11 compiler emits string concatenation; no other entry in the jar changes.
+- The rebuilt unmodified jar runs in the lab in place of the shipped one: both hosts Up, VM stop and start work.
+
+**Deploy and rollback.** Stop `cloudstack-management`, replace the jar, start it. Keep the shipped jar outside `lib/`, because everything in `lib/` is on the classpath. The deploy script refuses to run unless the live jar has the expected checksum, and has a rollback mode that restores the shipped jar.
+
+**Lab.** CloudStack 4.23.0.0 management server plus a two-node nested Proxmox VE 9 cluster with shared storage, registered as one External cluster using the AustinTechnology extension. A VM deployed through the extension starts, stops and live-migrates.
+
+**Lab limits.** No KVM hosts, so no system VMs: console access cannot be tested there. No adoption registry: adopted-VM paths and RefreshDetails cannot be tested there.
+
+**Carried forward.** Every step replaces the same server jar and needs the same restart; the difference between steps is how many classes change, not which file is deployed.
+
+### Step 2: follow VMs that the orchestrator moves (plugin classes only)
 
 Everything in the HA model depends on this: when Proxmox HA or an operator moves a VM, CloudStack has to record the new host by itself.
 
+- **Lab observation, 12 Nov 2026:** on unmodified 4.23.0.0, a running VM live-migrated in Proxmox was shown on its new host by CloudStack within about two minutes, with no patch. So the running-VM case may already work. Not yet tested: a stopped VM that is moved, and a VM restarted on another node by Proxmox HA.
 - Read how `host_id` is updated from power reports for External VMs (`VirtualMachinePowerStateSyncImpl`, `updatePowerState`) and what `trackVmHostChange()` gates. This was not traced for this plan.
 - Then either return `true` from `ExternalHypervisorGuru.trackVmHostChange()` or make the smallest change that lets CloudStack record the new host when a VM is reported from a different one.
 
 Validation: migrate a test VM between Proxmox nodes, and separately let Proxmox HA recover one from a fenced node, and confirm CloudStack shows the new host and Running with no manual step.
 
-### Step 3: answer the two commands that hit the fallback (plugin jar only)
+### Step 3: answer the two commands that hit the fallback (plugin classes only)
 
 Files: `ExternalResource.java`, `ExternalPathPayloadProvisioner.java`, their existing tests under `plugins/hypervisors/external/src/test/`, and the Proxmox script.
 
@@ -119,7 +129,7 @@ Validation:
 Files: `UserVmManagerImpl.java` (2117), `ExternalResource.java`, the provisioner, the script.
 
 - Allow scale for External VMs and add a handler for `ScaleVmCommand` that calls a new script action to set cores and memory in Proxmox.
-- This changes the `cloud-server` jar as well as the plugin jar, like step 4.
+- This changes core management-server classes as well as the plugin classes, like step 4.
 
 Validation: change a custom-offering VM's CPU/RAM in CloudStack and confirm Proxmox matches; confirm a fixed-offering change of offering does the same.
 
@@ -152,7 +162,8 @@ Decide first whether External VM disks should become CloudStack volumes at all. 
 
 ## Risks
 
-- **Carried patches.** Every step not accepted upstream must be re-applied on each CloudStack upgrade. Steps 1 to 3 touch one small jar; steps 4 onward touch the main server jars and cost more to carry.
+- **Carried patches.** Every step not accepted upstream must be re-applied on each CloudStack upgrade. Steps 2 and 3 change only External plugin classes; steps 4 onward also change core management-server classes and cost more to carry.
+- **A package upgrade replaces the jar.** Any `cloudstack-management` package upgrade or reinstall overwrites the patched jar with the shipped one.
 - **Restart per deployment.** Each jar change needs a management server restart.
 - **HA flag before step 4.** Until step 4 is deployed, turning CloudStack HA on for an External VM brings back the stuck-Running fault. Keep it off until then.
 - **Two HA managers.** Step 4 is safe only if every CloudStack restart path is skipped for External. The fence-a-node test in step 4 is the check.
@@ -165,6 +176,6 @@ Decide first whether External VM disks should become CloudStack volumes at all. 
 
 ## Decided
 
-- Plan approved 11 Nov 2026. Trials run on a non-production CloudStack, to be built on HV08.
+- Plan approved 11 Nov 2026. Trials run on the non-production CloudStack built on HV08 on 12 Nov 2026.
 - HA follows the model above.
 - The fork is public because GitHub forks of public repositories are public.
