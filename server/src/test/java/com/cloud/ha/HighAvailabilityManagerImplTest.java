@@ -271,6 +271,31 @@ public class HighAvailabilityManagerImplTest {
     }
 
     @Test
+    public void scheduleRestartForVmsOnExternalHostIsLeftToTheOrchestrator() {
+        Mockito.when(hostVO.getType()).thenReturn(Host.Type.Routing);
+        Mockito.when(hostVO.getHypervisorType()).thenReturn(HypervisorType.External);
+
+        highAvailabilityManager.scheduleRestartForVmsOnHost(hostVO, true, HighAvailabilityManager.ReasonType.HostDown);
+
+        Mockito.verify(_instanceDao, Mockito.never()).listByHostId(Mockito.anyLong());
+    }
+
+    @Test
+    public void scheduleRestartOfExternalVmIsLeftToTheOrchestrator() {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vm.getDataCenterId()).thenReturn(1L);
+        Mockito.when(vm.getHostId()).thenReturn(1L);
+        Mockito.when(vm.getHypervisorType()).thenReturn(HypervisorType.External);
+        ConfigKey<Boolean> haEnabled = Mockito.mock(ConfigKey.class);
+        highAvailabilityManager.VmHaEnabled = haEnabled;
+        Mockito.when(highAvailabilityManager.VmHaEnabled.valueIn(1L)).thenReturn(true);
+
+        highAvailabilityManager.scheduleRestart(vm, true);
+
+        Mockito.verify(_haDao, Mockito.never()).persist(Mockito.any());
+    }
+
+    @Test
     public void scheduleStop() {
         VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
         Mockito.when(vm.getId()).thenReturn(1L);

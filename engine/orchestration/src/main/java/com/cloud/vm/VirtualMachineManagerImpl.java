@@ -5531,7 +5531,8 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
             if((HighAvailabilityManager.ForceHA.value() || vm.isHaEnabled()) && vm.getState() == State.Running
                     && HaVmRestartHostUp.value()
                     && vm.getHypervisorType() != HypervisorType.VMware
-                    && vm.getHypervisorType() != HypervisorType.Hyperv) {
+                    && vm.getHypervisorType() != HypervisorType.Hyperv
+                    && vm.getHypervisorType() != HypervisorType.External) {
                 logger.info("Detected out-of-band stop of a HA enabled VM {}, will schedule restart.", vm);
                 if (!_haMgr.hasPendingHaWork(vm.getId())) {
                     _haMgr.scheduleRestart(vm, true);

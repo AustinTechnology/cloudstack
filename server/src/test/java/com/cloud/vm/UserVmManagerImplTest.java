@@ -89,6 +89,7 @@ import org.apache.cloudstack.engine.subsystem.api.storage.Scope;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeDataFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.config.ConfigKey;
+import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.framework.jobs.impl.AsyncJobVO;
 import org.apache.cloudstack.resourcelimit.Reserver;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
@@ -136,6 +137,7 @@ import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
+import com.cloud.agent.api.Answer;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.network.Network;
 import com.cloud.network.NetworkModel;
@@ -317,6 +319,9 @@ public class UserVmManagerImplTest {
 
     @Mock
     HostDao hostDao;
+
+    @Mock
+    ExtensionsManager extensionsManager;
 
     @Mock
     private VolumeVO volumeVOMock;
@@ -614,6 +619,47 @@ public class UserVmManagerImplTest {
 
         Mockito.verify(userVmManagerImpl).updateDisplayVmFlag(false, vmId, userVmVoMock);
         Mockito.verify(vmInstanceDetailsDao, times(0)).removeDetail(anyLong(), anyString());
+    }
+
+    private UserVm updateHaOfExternalInstance(boolean currentHa, boolean newHa) throws ResourceUnavailableException, InsufficientCapacityException {
+        Mockito.when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+        Mockito.when(userVmVoMock.isHaEnabled()).thenReturn(currentHa);
+        Mockito.when(_serviceOfferingDao.findById(Mockito.anyLong(), Mockito.anyLong())).thenReturn(getSvcoffering(512));
+        return userVmManagerImpl.updateVirtualMachine(vmId, null, null, newHa, null, null, null, null, null, null,
+                null, null, null, null, null, null, null);
+    }
+
+    private void verifyHaIsSaved(int times) {
+        Mockito.verify(userVmDao, times(times)).updateVM(anyLong(), nullable(String.class), anyBoolean(), nullable(Long.class),
+                nullable(String.class), nullable(Long.class), nullable(String.class), anyBoolean(), anyBoolean(), anyBoolean(),
+                nullable(String.class), nullable(String.class), nullable(String.class));
+    }
+
+    @Test
+    public void updateVirtualMachineTestHaChangeOfExternalInstanceIsPassedToTheOrchestrator() throws ResourceUnavailableException, InsufficientCapacityException {
+        Mockito.when(extensionsManager.setInstanceHa(userVmVoMock, false)).thenReturn(new Answer(null, true, null));
+
+        updateHaOfExternalInstance(true, false);
+
+        Mockito.verify(extensionsManager).setInstanceHa(userVmVoMock, false);
+        verifyHaIsSaved(1);
+    }
+
+    @Test
+    public void updateVirtualMachineTestHaChangeOfExternalInstanceIsNotSavedWhenTheOrchestratorFails() {
+        Mockito.when(extensionsManager.setInstanceHa(userVmVoMock, false)).thenReturn(new Answer(null, false, "no"));
+
+        assertThrows(CloudRuntimeException.class, () -> updateHaOfExternalInstance(true, false));
+
+        verifyHaIsSaved(0);
+    }
+
+    @Test
+    public void updateVirtualMachineTestUnchangedHaOfExternalInstanceIsNotPassedToTheOrchestrator() throws ResourceUnavailableException, InsufficientCapacityException {
+        updateHaOfExternalInstance(false, false);
+
+        Mockito.verify(extensionsManager, never()).setInstanceHa(any(), anyBoolean());
+        verifyHaIsSaved(1);
     }
 
     @Test

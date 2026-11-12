@@ -112,6 +112,7 @@ import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.Command;
 import com.cloud.agent.api.RunCustomActionAnswer;
+import com.cloud.agent.api.RunCustomActionCommand;
 import com.cloud.agent.api.to.VirtualMachineTO;
 import com.cloud.alert.AlertManager;
 import com.cloud.cluster.ClusterManager;
@@ -124,6 +125,7 @@ import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.exception.OperationTimedoutException;
 import com.cloud.exception.PermissionDeniedException;
 import com.cloud.host.Host;
+import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
 import com.cloud.host.dao.HostDetailsDao;
 import com.cloud.hypervisor.ExternalProvisioner;
@@ -2416,6 +2418,37 @@ public class ExtensionsManagerImplTest {
         when(extensionsManager.getExtensionIdForCluster(clusterId)).thenReturn(null);
         Extension result = extensionsManager.getExtensionForCluster(clusterId);
         assertNull(result);
+    }
+
+    @Test
+    public void setInstanceHaSendsTheSettingToTheHostOfTheInstance() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
+        HostVO host = mock(HostVO.class);
+        when(host.getId()).thenReturn(5L);
+        when(host.getClusterId()).thenReturn(1L);
+        when(hostDao.findById(5L)).thenReturn(host);
+        when(virtualMachineManager.toVmTO(any())).thenReturn(mock(VirtualMachineTO.class));
+        Answer expectedAnswer = mock(Answer.class);
+        ArgumentCaptor<RunCustomActionCommand> captor = ArgumentCaptor.forClass(RunCustomActionCommand.class);
+        when(agentMgr.easySend(eq(5L), captor.capture())).thenReturn(expectedAnswer);
+
+        Answer result = extensionsManager.setInstanceHa(vm, true);
+
+        assertEquals(expectedAnswer, result);
+        assertEquals(ExtensionsManager.SET_HA_ACTION, captor.getValue().getActionName());
+        assertEquals(Boolean.TRUE, captor.getValue().getParameters().get("enabled"));
+    }
+
+    @Test
+    public void setInstanceHaFailsWhenTheInstanceHasNoHost() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(null, null));
+
+        Answer result = extensionsManager.setInstanceHa(vm, true);
+
+        assertFalse(result.getResult());
+        verify(agentMgr, never()).easySend(anyLong(), any());
     }
 
     @Test
