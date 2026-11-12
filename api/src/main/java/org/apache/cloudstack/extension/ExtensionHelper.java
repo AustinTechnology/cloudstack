@@ -31,6 +31,17 @@ public interface ExtensionHelper {
     List<String> getExtensionReservedResourceDetails(long extensionId);
 
     /**
+     * Name of the extension detail that an Orchestrator extension sets to "true" when its script
+     * handles the "scale" action, which changes the CPU count and memory of a stopped instance.
+     */
+    String INSTANCE_SCALE_SUPPORTED = "instancescalesupported";
+
+    /**
+     * Whether the extension declares, with the detail {@link #INSTANCE_SCALE_SUPPORTED}, that it can scale instances.
+     */
+    boolean isInstanceScaleSupported(long extensionId);
+
+    /**
      * Network Guru of Network Extension
      */
     String NETWORK_EXTENSION_GURU_NAME = "NetworkExtensionGuestNetworkGuru";

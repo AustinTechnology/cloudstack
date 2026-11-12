@@ -31,6 +31,7 @@ import org.apache.cloudstack.affinity.AffinityGroupResponse;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.BaseResponseWithTagInformation;
 import org.apache.cloudstack.api.EntityReference;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.commons.collections.CollectionUtils;
 
 import com.cloud.network.router.VirtualRouter;
@@ -371,6 +372,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
     @SerializedName(ApiConstants.IS_DYNAMICALLY_SCALABLE)
     @Param(description = "True if Instance contains XS/VMWare tools in order to support dynamic scaling of Instance CPU/memory.")
     private Boolean isDynamicallyScalable;
+
+    @SerializedName(ExtensionHelper.INSTANCE_SCALE_SUPPORTED)
+    @Param(description = "For an Instance on an External hypervisor, true if its extension can change the CPU and memory of the stopped Instance.")
+    private Boolean instanceScaleSupported;
 
     @SerializedName(ApiConstants.DELETE_PROTECTION)
     @Param(description = "true if vm has delete protection.", since = "4.20.0")
@@ -1161,6 +1166,14 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
 
     public void setDynamicallyScalable(Boolean dynamicallyScalable) {
         isDynamicallyScalable = dynamicallyScalable;
+    }
+
+    public Boolean getInstanceScaleSupported() {
+        return instanceScaleSupported;
+    }
+
+    public void setInstanceScaleSupported(Boolean instanceScaleSupported) {
+        this.instanceScaleSupported = instanceScaleSupported;
     }
 
     public boolean isDeleteProtection() {

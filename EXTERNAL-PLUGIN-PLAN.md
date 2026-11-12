@@ -197,10 +197,21 @@ Lab results (574 unit tests pass; 570 before):
 | VM running in Proxmox but Stopped in CloudStack | Refused with a clear error; offering not changed |
 | Change to a no-HA offering and back, with a start after each | Left and rejoined Proxmox HA |
 
+Capability-gated UI follow-up (built and deployed in the lab, 12 Nov 2026):
+
+- An administrator explicitly declares support with the extension detail `instancescalesupported=true`. Missing/false means unsupported. This is an opt-in declaration, not automatic script inspection.
+- `listVirtualMachines` exposes a boolean `instancescalesupported` for External VMs, derived from the enabled Orchestrator extension registered to the VM's current/last-host cluster, not the template's original extension. Normal users receive the boolean without extension credentials or an admin-only lookup.
+- The Scale button is shown only for stopped External instances with that boolean true; shared-filesystem instances remain excluded. Other hypervisors retain their existing rules.
+- The action-dispatch path enforces the same capability against the target host's extension before sending `scale`. Hiding the button is not the only protection; both offering-change APIs pass through this dispatch path.
+- Enabled only on the lab's `Proxmox Adoption Registry` extension. Other extensions default to unsupported; production remains unchanged.
+- Validation: 585 Java tests pass; production UI build succeeds; nine UI predicate cases pass. Live lab: absent/false declaration gives false in the VM response and a direct scale request fails without metadata changes; true declaration permits scaling, and the stopped VM response reports true. Scaled up and restored to 1 CPU / 512 MiB, then started; Proxmox HA started and no CloudStack HA work rows.
+- Live HTTP index and application bundle are byte-identical to the local UI build. Predicate checks against real API records show hidden when unsupported, visible when supported/stopped, hidden when supported/running. Full rendered/browser click-through remains unverified: the browser tool returns `ERR_ADDRESS_UNREACHABLE`, although HTTP and SSH reach the lab.
+- Runtime pitfall fixed: `UserVmJoinVO.hostId` is primitive `long`, so SQL NULL becomes zero. Stopped-instance capability lookup must fall back to `lastHostId` for zero as well as null.
+
 Not done:
 
-- The UI hides the Scale button for External VMs (`ui/src/config/section/compute.js`). The API works; the UI needs a one-line change and a UI rebuild.
 - Adopted VMs could not be tested (no adoption registry in the lab). An adopted VM's manifest records its expected CPU and memory, so the manifest check at the next start needs review before scale is used on adopted VMs.
+- The existing scaling behavior still retains a valid lower `vcpus` value. This UI follow-up does not change CPU hotplug or balloon policy.
 
 ### Step 6: NIC add and remove
 

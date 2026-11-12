@@ -2295,6 +2295,12 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             logger.error("Unable to find a host to run the action {} for {}", action, vm);
             return new Answer(null, false, String.format("No host found for the instance: %s", vm.getName()));
         }
+        if (SCALE_ACTION.equals(action)) {
+            Extension extension = getExtensionForCluster(host.getClusterId());
+            if (extension == null || !isInstanceScaleSupported(extension.getId())) {
+                return new Answer(null, false, "The instance's extension does not support scaling.");
+            }
+        }
         VirtualMachineTO virtualMachineTO = virtualMachineManager.toVmTO(new VirtualMachineProfileImpl(vm));
         RunCustomActionCommand cmd = new RunCustomActionCommand(action);
         cmd.setVmTO(virtualMachineTO);
@@ -2331,6 +2337,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             return null;
         }
         return extensionDao.findById(extensionId);
+    }
+
+    @Override
+    public boolean isInstanceScaleSupported(long extensionId) {
+        Extension extension = getExtension(extensionId);
+        if (extension == null || extension.getType() != Extension.Type.Orchestrator
+                || extension.getState() != Extension.State.Enabled) {
+            return false;
+        }
+        ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(extensionId, INSTANCE_SCALE_SUPPORTED);
+        return detailsVO != null && Boolean.parseBoolean(StringUtils.trim(detailsVO.getValue()));
     }
 
     @Override
