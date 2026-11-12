@@ -2362,6 +2362,15 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public boolean isInstanceNicHotplugSupported(long extensionId) {
+        if (!isInstanceNicChangeSupported(extensionId)) {
+            return false;
+        }
+        ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_NIC_HOTPLUG_SUPPORTED);
+        return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
+    }
+
+    @Override
     public List<String> getExtensionReservedResourceDetails(long extensionId) {
         ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(extensionId,
                 ApiConstants.RESERVED_RESOURCE_DETAILS);

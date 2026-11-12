@@ -132,6 +132,26 @@ public class ExternalResourceTest {
     }
 
     @Test
+    public void persistentNetworkSetupHasTypedUnsupportedAnswer() {
+        com.cloud.agent.api.SetupPersistentNetworkCommand cmd = new com.cloud.agent.api.SetupPersistentNetworkCommand(null);
+        Answer answer = externalResource.executeRequest(cmd);
+        assertTrue(answer instanceof com.cloud.agent.api.SetupPersistentNetworkAnswer);
+        assertFalse(answer.getResult());
+    }
+
+    @Test
+    public void nicDispatchExceptionsReturnTypedUnknownAnswers() {
+        ExternalProvisioner provisioner = readyResourceWithProvisioner();
+        PlugNicCommand plug = new PlugNicCommand(null, "i-2-1-VM", VirtualMachine.Type.User);
+        when(provisioner.plugInstanceNic("External:guid", "testExtension", "path", plug))
+                .thenThrow(new IllegalArgumentException("lost result"));
+        Answer answer = externalResource.executeRequest(plug);
+        assertTrue(answer instanceof PlugNicAnswer);
+        assertFalse(answer.getResult());
+        assertTrue(answer.getDetails().contains("NIC_OUTCOME_UNKNOWN"));
+    }
+
+    @Test
     public void disabledExtensionRejectsNicCommandsWithoutDispatch() {
         ExternalProvisioner provisioner = readyResourceWithProvisioner();
         ReflectionTestUtils.setField(externalResource, "extensionState", Extension.State.Disabled);

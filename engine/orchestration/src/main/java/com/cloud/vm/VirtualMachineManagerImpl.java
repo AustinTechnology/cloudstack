@@ -4673,7 +4673,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
             logger.debug("Plugging NIC for Instance {} in Network {}", vm, network);
 
             boolean result = false;
-            boolean outcomeUnknown = externalStopped;
+            boolean outcomeUnknown = vm.getHypervisorType() == HypervisorType.External;
             try {
                 result = plugNic(network, nicTO, vmTO, context, dest);
                 outcomeUnknown = false;

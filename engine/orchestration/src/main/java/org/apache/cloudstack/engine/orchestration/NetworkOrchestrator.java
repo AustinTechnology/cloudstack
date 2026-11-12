@@ -2261,6 +2261,17 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
         final NetworkGuru guru = AdapterBase.getAdapterByName(networkGurus, network.getGuruName());
         final NicVO nic = _nicDao.findById(nicId);
 
+        // External tagged L2 NICs need both URIs before constructing the profile,
+        // including when an address was allocated before prepare.
+        if (vmProfile.getHypervisorType() == HypervisorType.External && network.getGuestType() == GuestType.L2) {
+            if (nic.getBroadcastUri() == null) {
+                nic.setBroadcastUri(network.getBroadcastUri());
+            }
+            if (nic.getIsolationUri() == null) {
+                nic.setIsolationUri(network.getBroadcastUri());
+            }
+        }
+
         NicProfile profile;
         if (nic.getReservationStrategy() == Nic.ReservationStrategy.Start) {
             nic.setState(Nic.State.Reserving);

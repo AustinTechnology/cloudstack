@@ -1630,18 +1630,22 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         if (!HypervisorType.External.equals(vm.getHypervisorType())) {
             return;
         }
-        if (vm.getState() != State.Stopped) {
-            throw new InvalidParameterValueException("External NIC changes require a stopped instance.");
+        if (vm.getState() != State.Stopped && vm.getState() != State.Running) {
+            throw new InvalidParameterValueException("External NIC changes require a stopped or running instance.");
         }
         if (network.getGuestType() != Network.GuestType.L2 || network.getBroadcastUri() == null
                 || !"vlan".equals(network.getBroadcastUri().getScheme())) {
             throw new InvalidParameterValueException("External NIC changes currently support tagged L2 networks only.");
         }
-        Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
+        Long hostId = vm.getState() == State.Running ? vm.getHostId() :
+                (vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId());
         HostVO host = hostId == null ? null : _hostDao.findById(hostId);
-        Long extensionId = host == null ? null : extensionHelper.getExtensionIdForCluster(host.getClusterId());
+        Long extensionId = host == null || host.getClusterId() == null ? null : extensionHelper.getExtensionIdForCluster(host.getClusterId());
         if (extensionId == null || !extensionHelper.isInstanceNicChangeSupported(extensionId)) {
             throw new InvalidParameterValueException("The instance's extension does not support NIC changes.");
+        }
+        if (vm.getState() == State.Running && !extensionHelper.isInstanceNicHotplugSupported(extensionId)) {
+            throw new InvalidParameterValueException("The instance's extension does not support online NIC changes.");
         }
     }
 
