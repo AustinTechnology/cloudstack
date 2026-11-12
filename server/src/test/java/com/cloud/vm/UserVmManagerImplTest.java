@@ -663,6 +663,33 @@ public class UserVmManagerImplTest {
     }
 
     @Test
+    public void scaleExternalInstanceTestPassesCpuAndMemoryToTheOrchestrator() {
+        Mockito.when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+        Mockito.when(extensionsManager.scaleInstance(userVmVoMock, 4, 8192)).thenReturn(new Answer(null, true, null));
+
+        userVmManagerImpl.scaleExternalInstance(userVmVoMock, 4, 8192);
+
+        Mockito.verify(extensionsManager).scaleInstance(userVmVoMock, 4, 8192);
+    }
+
+    @Test
+    public void scaleExternalInstanceTestFailsWhenTheOrchestratorFails() {
+        Mockito.when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+        Mockito.when(extensionsManager.scaleInstance(userVmVoMock, 4, 8192)).thenReturn(new Answer(null, false, "no"));
+
+        assertThrows(CloudRuntimeException.class, () -> userVmManagerImpl.scaleExternalInstance(userVmVoMock, 4, 8192));
+    }
+
+    @Test
+    public void scaleExternalInstanceTestDoesNothingForOtherHypervisors() {
+        Mockito.when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.KVM);
+
+        userVmManagerImpl.scaleExternalInstance(userVmVoMock, 4, 8192);
+
+        Mockito.verify(extensionsManager, never()).scaleInstance(any(), Mockito.anyInt(), Mockito.anyInt());
+    }
+
+    @Test
     public void updateVirtualMachineTestCleanUpTrue() throws ResourceUnavailableException, InsufficientCapacityException, ResourceAllocationException {
         configureDoNothingForMethodsThatWeDoNotWantToTest();
         ServiceOffering offering = getSvcoffering(512);

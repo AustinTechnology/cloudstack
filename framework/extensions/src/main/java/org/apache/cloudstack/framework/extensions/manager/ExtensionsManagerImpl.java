@@ -2275,17 +2275,29 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     @Override
     public Answer setInstanceHa(VirtualMachine vm, boolean enabled) {
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put(ApiConstants.ENABLED, enabled);
+        return runInstanceAction(vm, SET_HA_ACTION, parameters);
+    }
+
+    @Override
+    public Answer scaleInstance(VirtualMachine vm, int cpuNumber, int memoryMib) {
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put(ApiConstants.CPU_NUMBER, cpuNumber);
+        parameters.put(ApiConstants.MEMORY, memoryMib);
+        return runInstanceAction(vm, SCALE_ACTION, parameters);
+    }
+
+    protected Answer runInstanceAction(VirtualMachine vm, String action, Map<String, Object> parameters) {
         Pair<Long, Long> clusterAndHostId = virtualMachineManager.findClusterAndHostIdForVm(vm, false);
         Host host = clusterAndHostId.second() == null ? null : hostDao.findById(clusterAndHostId.second());
         if (host == null) {
-            logger.error("Unable to find a host to set HA to {} for {}", enabled, vm);
+            logger.error("Unable to find a host to run the action {} for {}", action, vm);
             return new Answer(null, false, String.format("No host found for the instance: %s", vm.getName()));
         }
         VirtualMachineTO virtualMachineTO = virtualMachineManager.toVmTO(new VirtualMachineProfileImpl(vm));
-        RunCustomActionCommand cmd = new RunCustomActionCommand(SET_HA_ACTION);
+        RunCustomActionCommand cmd = new RunCustomActionCommand(action);
         cmd.setVmTO(virtualMachineTO);
-        Map<String, Object> parameters = new HashMap<>();
-        parameters.put(ApiConstants.ENABLED, enabled);
         cmd.setParameters(parameters);
         cmd.setExternalDetails(getExternalAccessDetails(host, virtualMachineTO.getExternalDetails()));
         cmd.setWait(AgentManager.Wait.value());

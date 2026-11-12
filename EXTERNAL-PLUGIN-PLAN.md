@@ -176,14 +176,31 @@ Before production:
 - **Role.** Add `Sys.Console` to the production `CloudStackExtension` role first. Without it a start that needs to change HA fails. Review what else that privilege allows before granting it.
 - **Jar first, flag second.** With the old jar, an External VM with the flag on makes CloudStack compete with Proxmox HA.
 
-### Step 5: scale VM
+### Step 5: scale VM (done in the lab, 12 Nov 2026)
 
-Files: `UserVmManagerImpl.java` (2117), `ExternalResource.java`, the provisioner, the script.
+Files: `UserVmManagerImpl.java`, `ExtensionsManager.java`, `ExtensionsManagerImpl.java`, the script.
 
-- Allow scale for External VMs and add a handler for `ScaleVmCommand` that calls a new script action to set cores and memory in Proxmox.
-- This changes core management-server classes as well as the plugin classes, like step 4.
+- **Stopped instances only.** The block on `scaleVirtualMachine` for External is removed. When the offering of a stopped External VM changes, CloudStack calls a new script action `scale` with `cpunumber` and `memory` (MiB), and saves the new offering only if the script succeeds. `changeServiceForVirtualMachine` takes the same path.
+- **Running instances are still refused**, by the existing check that the hypervisor supports dynamic scaling. Proxmox would hold the change as pending until the next restart, so CloudStack and the guest would disagree. No `ScaleVmCommand` handler was needed.
+- **Proxmox script.** `scale` refuses unless the VM is stopped in Proxmox. It keeps the socket count when the new CPU count divides by it and otherwise uses one socket. It lowers the balloon minimum and removes the `vcpus` limit when they would exceed the new size.
+- The HA setting of the new offering is applied at the next start, by the step 4 code.
 
-Validation: change a custom-offering VM's CPU/RAM in CloudStack and confirm Proxmox matches; confirm a fixed-offering change of offering does the same.
+Lab results (574 unit tests pass; 570 before):
+
+| Action | Result |
+|---|---|
+| Scale a running VM | Refused; Proxmox unchanged |
+| Stopped, fixed offering 1 CPU / 512 MB to 2 / 1024 | Proxmox matched; guest booted with 2 CPUs and 1024 MB |
+| Stopped, custom offering 3 / 2048, then down to 1 / 768 | Proxmox matched both times |
+| `changeServiceForVirtualMachine` to a fixed offering | Proxmox matched |
+| VM with 2 sockets, `vcpus` and a balloon minimum, scaled up and down | Sockets kept when divisible; `vcpus` removed and balloon lowered when too large |
+| VM running in Proxmox but Stopped in CloudStack | Refused with a clear error; offering not changed |
+| Change to a no-HA offering and back, with a start after each | Left and rejoined Proxmox HA |
+
+Not done:
+
+- The UI hides the Scale button for External VMs (`ui/src/config/section/compute.js`). The API works; the UI needs a one-line change and a UI rebuild.
+- Adopted VMs could not be tested (no adoption registry in the lab). An adopted VM's manifest records its expected CPU and memory, so the manifest check at the next start needs review before scale is used on adopted VMs.
 
 ### Step 6: NIC add and remove
 
