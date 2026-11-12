@@ -210,15 +210,32 @@ Capability-gated UI follow-up (built and deployed in the lab, 12 Nov 2026):
 
 Not done:
 
-- Adopted VMs could not be tested (no adoption registry in the lab). An adopted VM's manifest records its expected CPU and memory, so the manifest check at the next start needs review before scale is used on adopted VMs.
+- Adopted VMs could not be tested (no adoption registry in the lab). Correction after tracing `start()`: the CPU/RAM manifest comparison runs only for the initial `bound` adoption acknowledgement, not ordinary `managed` starts. Adopted scaling is an untested path, not a demonstrated later-start manifest mismatch.
 - The existing scaling behavior still retains a valid lower `vcpus` value. This UI follow-up does not change CPU hotplug or balloon policy.
 
-### Step 6: NIC add and remove
+### Step 6: NIC add and remove (stopped tagged-L2 scope implemented in lab, 12 Nov 2026)
 
-- Add handlers for `PlugNicCommand` and `UnPlugNicCommand`, with script actions that add or remove a Proxmox network device on the right bridge and VLAN.
-- Check whether the management server refuses these for External VMs before they reach the plugin. This was not traced for this plan.
+Scope and implementation:
+- Stopped External VMs on tagged L2 networks only. Running requests and other network types are rejected before allocation/deallocation. No live hotplug, default-NIC changes, or DHCP-option configuration is introduced.
+- Explicit `PlugNicCommand` / `UnPlugNicCommand` handlers return typed answers and rebuild VM/host/cluster access context. The NIC parameter carries the exact MAC, device ID, and VLAN URI.
+- Stock stopped-VM orchestration only changes CloudStack metadata. It now dispatches External NIC changes using the last host before reporting success, while native-hypervisor behavior stays unchanged.
+- Default-false extension detail `instancenicchangesupported=true` gates both API entry and provider dispatch. The VM response exposes the boolean using the registered current/last-host cluster extension. The UI shows add/remove only for supported stopped External VMs, retains permissions/default-NIC protection, limits network choices to L2, and hides Make default.
+- Proxmox script verifies stopped state, uniquely resolves current node, validates MAC/VLAN/host bridge, uses a configuration-digest guard, checks pending state and reads back applied configuration. Removal matches MAC rather than CloudStack's device index. A verified already-absent MAC is read-only success; ambiguity is refused.
+- Unknown add outcomes retain the CloudStack NIC allocation and fail the job rather than automatically deleting metadata or issuing compensating mutations. Definite pre-write failure follows cleanup. Operator inspection is required before any retry. A retained NIC can be removed through the normal API after inspecting the provider state.
 
-Validation: add and remove a NIC from CloudStack on a test VM and confirm the Proxmox device, MAC and VLAN match.
+Verified in the isolated lab:
+- 593 Java tests, 9 offline shell-entrypoint tests, 6 UI predicate cases; UI build succeeds. Same-compiler comparison shows changes only in intended methods.
+- Running add/remove rejected; capability false rejected; default-NIC removal rejected.
+- Added NIC MAC `02:00:00:64:01:01`, bridge `vmbr1`, VLAN 101. CloudStack and Proxmox matched; after start the guest agent reported the new NIC as `ens19` while the original `eth0` kept `10.100.0.5`.
+- Stopped the guest, deliberately relocated the added provider device from `net1` to `net7`, then removed it through CloudStack. The exact MAC was removed; `net0` was preserved.
+- Injected a lost-success reply after a real successful provider add. The API failed as unknown, retained its NIC record, and did not undo or replay the provider operation. After reading both states, restored the original wrapper and removed the NIC through the API.
+- Guest restored running with its original single NIC/IP; HA test guest unchanged, CloudStack HA work count zero. Fault-injection wrapper removed.
+
+Limits / rollout:
+- No production changes. Production NIC/IP sync is not present in this lab; concurrent writer coordination remains a rollout requirement.
+- Adopted NIC operations retain the managed-claim check but have not been exercised against a live adoption registry. No manifest or registry contract changes.
+- Linux bridge/tagged-L2 path tested; running hotplug, untagged networks, routed/service networks and OVS-specific bridge handling are outside this initial scope.
+- Browser tool cannot route to the lab. UI build/predicate and HTTP asset checks are separate from rendered click-through verification, which remains outstanding.
 
 ### Step 7: let CloudStack pull a VM's real configuration
 

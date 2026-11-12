@@ -19,6 +19,10 @@ package com.cloud.hypervisor;
 import java.util.Map;
 
 import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.PlugNicAnswer;
+import com.cloud.agent.api.PlugNicCommand;
+import com.cloud.agent.api.UnPlugNicAnswer;
+import com.cloud.agent.api.UnPlugNicCommand;
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
@@ -70,4 +74,8 @@ public interface ExternalProvisioner extends Manager {
     CheckVirtualMachineAnswer checkInstance(String hostGuid, String extensionName, String extensionRelativePath, CheckVirtualMachineCommand cmd);
 
     Answer getInstanceIpAddress(String hostGuid, String extensionName, String extensionRelativePath, GetVmIpAddressCommand cmd);
+
+    PlugNicAnswer plugInstanceNic(String hostGuid, String extensionName, String extensionRelativePath, PlugNicCommand cmd);
+
+    UnPlugNicAnswer unplugInstanceNic(String hostGuid, String extensionName, String extensionRelativePath, UnPlugNicCommand cmd);
 }

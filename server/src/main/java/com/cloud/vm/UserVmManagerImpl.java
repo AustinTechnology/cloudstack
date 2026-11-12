@@ -1563,6 +1563,10 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
         // Perform permission check on VM
         _accountMgr.checkAccess(caller, null, true, vmInstance);
+        validateExternalNicChange(vmInstance, network);
+        if (HypervisorType.External.equals(vmInstance.getHypervisorType()) && MapUtils.isNotEmpty(cmd.getDhcpOptionsMap())) {
+            throw new InvalidParameterValueException("External NIC changes do not support DHCP options.");
+        }
 
         DataCenterVO dc = _dcDao.findById(vmInstance.getDataCenterId());
         validateVmZoneTypeForAddNic(vmInstance, dc);
@@ -1591,8 +1595,13 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
         try {
             guestNic = _itMgr.addVmToNetwork(vmInstance, network, profile);
-            saveExtraDhcpOptions(guestNic.getId(), cmd.getDhcpOptionsMap());
-            _networkMgr.configureExtraDhcpOptions(network, guestNic.getId(), cmd.getDhcpOptionsMap());
+            if (guestNic == null) {
+                throw new CloudRuntimeException("The backend did not add the NIC.");
+            }
+            if (!HypervisorType.External.equals(vmInstance.getHypervisorType())) {
+                saveExtraDhcpOptions(guestNic.getId(), cmd.getDhcpOptionsMap());
+                _networkMgr.configureExtraDhcpOptions(network, guestNic.getId(), cmd.getDhcpOptionsMap());
+            }
             cleanUp = false;
         } catch (ResourceUnavailableException e) {
             throw new CloudRuntimeException("Unable to add NIC to " + vmInstance + ": " + e);
@@ -1601,7 +1610,9 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         } catch (ConcurrentOperationException e) {
             throw new CloudRuntimeException("Concurrent operations on adding NIC to " + vmInstance + ": " + e);
         } finally {
-            if (cleanUp) {
+            // External orchestration cleans up a definite failure itself. A lost/unknown
+            // provider answer must not trigger another mutation or delete its NIC allocation.
+            if (cleanUp && !HypervisorType.External.equals(vmInstance.getHypervisorType())) {
                 try {
                     _itMgr.removeVmFromNetwork(vmInstance, network, null);
                 } catch (ResourceUnavailableException e) {
@@ -1613,6 +1624,25 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         logger.debug(String.format("Successful addition of %s from %s through %s", network, vmInstance, guestNic));
         publishNicEventMessageBus(vmInstance.getId(), vmInstance.getAccountId(), guestNic.getId(), EVENT_NIC_CREATE);
         return _vmDao.findById(vmInstance.getId());
+    }
+
+    protected void validateExternalNicChange(UserVmVO vm, Network network) {
+        if (!HypervisorType.External.equals(vm.getHypervisorType())) {
+            return;
+        }
+        if (vm.getState() != State.Stopped) {
+            throw new InvalidParameterValueException("External NIC changes require a stopped instance.");
+        }
+        if (network.getGuestType() != Network.GuestType.L2 || network.getBroadcastUri() == null
+                || !"vlan".equals(network.getBroadcastUri().getScheme())) {
+            throw new InvalidParameterValueException("External NIC changes currently support tagged L2 networks only.");
+        }
+        Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
+        HostVO host = hostId == null ? null : _hostDao.findById(hostId);
+        Long extensionId = host == null ? null : extensionHelper.getExtensionIdForCluster(host.getClusterId());
+        if (extensionId == null || !extensionHelper.isInstanceNicChangeSupported(extensionId)) {
+            throw new InvalidParameterValueException("The instance's extension does not support NIC changes.");
+        }
     }
 
     private void validateVmZoneTypeForAddNic(UserVmVO vmInstance, DataCenter dc) {
@@ -1757,6 +1787,8 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         if (dc.getNetworkType() == DataCenter.NetworkType.Basic) {
             throw new InvalidParameterValueException(String.format("Zone %s, has a NetworkType of Basic. Can't remove a NIC from a VM on a Basic Network", dc));
         }
+
+        validateExternalNicChange(vmInstance, network);
 
         // check to see if nic is attached to VM
         if (nic.getInstanceId() != vmId) {

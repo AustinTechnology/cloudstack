@@ -50,6 +50,7 @@ import javax.naming.ConfigurationException;
 
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.extension.Extension;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.utils.security.DigestHelper;
 import org.apache.commons.collections.CollectionUtils;
@@ -58,6 +59,10 @@ import org.apache.commons.lang3.ObjectUtils;
 
 import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.PlugNicAnswer;
+import com.cloud.agent.api.PlugNicCommand;
+import com.cloud.agent.api.UnPlugNicAnswer;
+import com.cloud.agent.api.UnPlugNicCommand;
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
@@ -74,6 +79,7 @@ import com.cloud.agent.api.StartAnswer;
 import com.cloud.agent.api.StartCommand;
 import com.cloud.agent.api.StopAnswer;
 import com.cloud.agent.api.StopCommand;
+import com.cloud.agent.api.to.NicTO;
 import com.cloud.agent.api.to.VirtualMachineTO;
 import com.cloud.host.Host;
 import com.cloud.host.HostVO;
@@ -132,6 +138,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
 
     @Inject
     ExtensionsManager extensionsManager;
+
+    @Inject
+    ExtensionHelper extensionHelper;
 
     private static final AtomicReference<Properties> propertiesRef = new AtomicReference<>();
     private String extensionsDirectory;
@@ -653,6 +662,52 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             return new Answer(cmd, false, "Invalid IP address in output");
         }
         return new Answer(cmd, true, ipAddress);
+    }
+
+    @Override
+    public PlugNicAnswer plugInstanceNic(String hostGuid, String extensionName, String extensionRelativePath, PlugNicCommand cmd) {
+        Pair<Boolean, String> result = changeInstanceNic(hostGuid, extensionName, extensionRelativePath,
+                cmd.getVmName(), cmd.getNic(), "plugnic", cmd.getWait());
+        return new PlugNicAnswer(cmd, result.first(), result.second());
+    }
+
+    @Override
+    public UnPlugNicAnswer unplugInstanceNic(String hostGuid, String extensionName, String extensionRelativePath, UnPlugNicCommand cmd) {
+        Pair<Boolean, String> result = changeInstanceNic(hostGuid, extensionName, extensionRelativePath,
+                cmd.getVmName(), cmd.getNic(), "unplugnic", cmd.getWait());
+        return new UnPlugNicAnswer(cmd, result.first(), result.second());
+    }
+
+    protected Pair<Boolean, String> changeInstanceNic(String hostGuid, String extensionName, String extensionRelativePath,
+            String instanceName, NicTO nic, String action, int wait) {
+        String extensionPath = getExtensionCheckedPath(extensionName, extensionRelativePath);
+        if (StringUtils.isEmpty(extensionPath)) {
+            return new Pair<>(false, getExtensionConfigureError(extensionName, hostGuid));
+        }
+        HostVO host = hostDao.findByGuid(hostGuid);
+        UserVmVO userVm = getUserVmByInstanceName(instanceName);
+        if (ObjectUtils.anyNull(host, userVm, nic)) {
+            return new Pair<>(false, "Host, instance or NIC not found");
+        }
+        Extension extension = extensionHelper.getExtensionForCluster(host.getClusterId());
+        if (extension == null || !extensionHelper.isInstanceNicChangeSupported(extension.getId())) {
+            return new Pair<>(false, "The instance's extension does not support NIC changes.");
+        }
+        VirtualMachineTO vmTO = getVirtualMachineTO(userVm);
+        Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
+        access.put(ApiConstants.VIRTUAL_MACHINE, vmTO.getExternalDetails());
+        Map<String, Object> payload = loadAccessDetails(access, vmTO);
+        Map<String, Object> nicDetails = new HashMap<>();
+        nicDetails.put("mac", nic.getMac());
+        nicDetails.put("deviceId", nic.getDeviceId());
+        nicDetails.put("broadcastUri", nic.getBroadcastUri() == null ? null : nic.getBroadcastUri().toString());
+        payload.put(ApiConstants.PARAMETERS, Map.of("nic", nicDetails));
+        Pair<Boolean, String> result = executeExternalCommand(extensionName, action, payload, wait,
+                "Failed to change NIC on the external system", extensionPath);
+        if (!result.first() && "Timeout".equals(result.second())) {
+            return new Pair<>(false, "NIC_OUTCOME_UNKNOWN: extension execution timed out");
+        }
+        return result;
     }
 
     protected boolean createExtensionPath(String extensionName, Path destinationPathObj) throws IOException {

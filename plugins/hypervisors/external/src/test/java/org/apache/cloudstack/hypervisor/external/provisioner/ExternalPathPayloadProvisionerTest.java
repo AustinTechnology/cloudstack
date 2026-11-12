@@ -50,6 +50,7 @@ import javax.naming.ConfigurationException;
 
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.extension.Extension;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.logging.log4j.Logger;
 import org.junit.After;
@@ -66,6 +67,12 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.PlugNicAnswer;
+import com.cloud.agent.api.PlugNicCommand;
+import com.cloud.agent.api.UnPlugNicAnswer;
+import com.cloud.agent.api.UnPlugNicCommand;
+import com.cloud.agent.api.to.NicTO;
+
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
@@ -129,6 +136,9 @@ public class ExternalPathPayloadProvisionerTest {
 
     @Mock
     private ExtensionsManager extensionsManager;
+
+    @Mock
+    private ExtensionHelper extensionHelper;
 
     private File tempDir;
     private File tempDataDir;
@@ -1189,6 +1199,43 @@ public class ExternalPathPayloadProvisionerTest {
                 "test-extension.sh", new CheckVirtualMachineCommand("i-2-9-VM"));
 
         assertFalse(answer.getResult());
+    }
+
+    @Test
+    public void nicChangePassesExactMacDeviceAndVlanWithVmAccessContext() {
+        UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
+        VirtualMachineTO vmTO = mock(VirtualMachineTO.class);
+        doReturn(vmTO).when(provisioner).getVirtualMachineTO(userVm);
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(4L);
+        when(extensionHelper.getExtensionForCluster(anyLong())).thenReturn(extension);
+        when(extensionHelper.isInstanceNicChangeSupported(4L)).thenReturn(true);
+        NicTO nic = mock(NicTO.class);
+        when(nic.getMac()).thenReturn("02:00:00:00:00:11");
+        when(nic.getDeviceId()).thenReturn(2);
+        when(nic.getBroadcastUri()).thenReturn(java.net.URI.create("vlan://101"));
+        org.mockito.ArgumentCaptor<Map> payload = org.mockito.ArgumentCaptor.forClass(Map.class);
+        doReturn(new Pair<>(true, "ok")).when(provisioner).executeExternalCommand(
+                eq("test-extension"), eq("plugnic"), payload.capture(), anyInt(), anyString(), anyString());
+        PlugNicAnswer answer = provisioner.plugInstanceNic("External:guid", "test-extension", "test-extension.sh",
+                new PlugNicCommand(nic, "i-2-1-VM", VirtualMachine.Type.User));
+        assertTrue(answer.getResult());
+        Map parameters = (Map)payload.getValue().get("parameters");
+        Map nicData = (Map)parameters.get("nic");
+        assertEquals("02:00:00:00:00:11", nicData.get("mac"));
+        assertEquals(2, nicData.get("deviceId"));
+        assertEquals("vlan://101", nicData.get("broadcastUri"));
+    }
+
+    @Test
+    public void nicChangeRefusesAnExtensionWithoutCapability() {
+        mockInstanceOnHost("i-2-1-VM");
+        when(extensionHelper.getExtensionForCluster(anyLong())).thenReturn(null);
+        UnPlugNicAnswer answer = provisioner.unplugInstanceNic("External:guid", "test-extension", "test-extension.sh",
+                new UnPlugNicCommand(mock(NicTO.class), "i-2-1-VM"));
+        assertFalse(answer.getResult());
+        org.mockito.Mockito.verify(provisioner, org.mockito.Mockito.never())
+                .executeExternalCommand(anyString(), anyString(), anyMap(), anyInt(), anyString(), anyString());
     }
 
     private Answer getIpAddressWithScriptResult(Pair<Boolean, String> scriptResult) {

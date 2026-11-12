@@ -29,6 +29,11 @@ import static org.mockito.ArgumentMatchers.any;
 
 import org.apache.cloudstack.extension.Extension;
 import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.PlugNicAnswer;
+import com.cloud.agent.api.PlugNicCommand;
+import com.cloud.agent.api.UnPlugNicAnswer;
+import com.cloud.agent.api.UnPlugNicCommand;
+
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetVmIpAddressCommand;
@@ -111,6 +116,29 @@ public class ExternalResourceTest {
         ReflectionTestUtils.setField(externalResource, "extensionPathReady", true);
         ReflectionTestUtils.setField(externalResource, "guid", "External:guid");
         return provisioner;
+    }
+
+    @Test
+    public void nicCommandsHaveTypedAnswersAndUseTheProvisioner() {
+        ExternalProvisioner provisioner = readyResourceWithProvisioner();
+        PlugNicCommand plug = new PlugNicCommand(null, "i-2-1-VM", VirtualMachine.Type.User);
+        UnPlugNicCommand unplug = new UnPlugNicCommand(null, "i-2-1-VM");
+        when(provisioner.plugInstanceNic("External:guid", "testExtension", "path", plug))
+                .thenReturn(new PlugNicAnswer(plug, true, null));
+        when(provisioner.unplugInstanceNic("External:guid", "testExtension", "path", unplug))
+                .thenReturn(new UnPlugNicAnswer(unplug, true, null));
+        assertTrue(externalResource.executeRequest(plug) instanceof PlugNicAnswer);
+        assertTrue(externalResource.executeRequest(unplug) instanceof UnPlugNicAnswer);
+    }
+
+    @Test
+    public void disabledExtensionRejectsNicCommandsWithoutDispatch() {
+        ExternalProvisioner provisioner = readyResourceWithProvisioner();
+        ReflectionTestUtils.setField(externalResource, "extensionState", Extension.State.Disabled);
+        assertFalse(externalResource.executeRequest(new PlugNicCommand(null, "i-2-1-VM", VirtualMachine.Type.User)).getResult());
+        assertFalse(externalResource.executeRequest(new UnPlugNicCommand(null, "i-2-1-VM")).getResult());
+        verify(provisioner, never()).plugInstanceNic(any(), any(), any(), any());
+        verify(provisioner, never()).unplugInstanceNic(any(), any(), any(), any());
     }
 
     @Test
