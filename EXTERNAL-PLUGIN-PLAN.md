@@ -125,7 +125,7 @@ Validation:
 - On a running External VM with a guest agent: CloudStack populates the NIC IP without the sync tool.
 - The `Missing required fields` log lines stop.
 
-### Step 4: HA handed to the orchestrator (first management-server change)
+### Step 4: HA handed to the orchestrator (first management-server change; done in the lab, 12 Nov 2026)
 
 Files: `HighAvailabilityManagerImpl.java` (327, 496, 541), `VirtualMachineManagerImpl.java` (5533), a new investigator and fencer in the External plugin, `ExternalResource.java`, the provisioner, the script.
 
@@ -136,11 +136,45 @@ Files: `HighAvailabilityManagerImpl.java` (327, 496, 541), `VirtualMachineManage
 - **Permissions.** The `CloudStackExtension` Proxmox role has no HA rights today. The privilege needed to manage HA resources has to be confirmed and added to the role.
 - **Existing VMs.** Set each VM's CloudStack HA flag from what Proxmox HA has today, so turning this on changes nothing in Proxmox. The "(no HA)" offerings created on 11 Nov then mean what they say.
 
-Validation:
-- HA on in the offering: the VM appears in Proxmox HA; fence its node and Proxmox restarts it; CloudStack follows to the new host and starts nothing itself.
-- HA off: the VM leaves Proxmox HA.
-- Power an HA-on VM off inside the guest: CloudStack shows Stopped and schedules no restart.
-- Stop an HA-on VM from CloudStack: it stays stopped.
+**Status, 12 Nov 2026: built and running in the lab; not reviewed, not in production.**
+
+What was built:
+- External added to the three existing skips: `HighAvailabilityManagerImpl.scheduleRestartForVmsOnHost` and `scheduleRestart`, and the power-off branch in `VirtualMachineManagerImpl`. The VMware-only skip further down `scheduleRestart` is unreachable for External because the earlier one returns first.
+- `ExternalInvestigator` and `ExternalFencer` in the plugin, copies of the VMware ones, registered in `spring-external-compute-context.xml`.
+- `ExtensionsManager.setInstanceHa(vm, enabled)` sends the script action `setha` with the parameter `enabled`. `UserVmManagerImpl.updateVirtualMachine` calls it when `haenable` changes on an External VM and saves the flag only if the script succeeds.
+- Deploy and start need no Java: the payload already carries `enableHA`, and the script applies it on `create` and `start`.
+- Script: `setha` adds or removes the Proxmox HA resource and keeps the VM's present power state. `delete` removes the HA resource first, because Proxmox refuses to delete an HA-managed VM. `start` and `stop` wait until the VM has really changed state, because Proxmox answers at once for an HA-managed VM. `status` also returns `ha_enabled`.
+- Proxmox needs `Sys.Console` on `/` to add, change or remove HA resources. It was added to the lab role only.
+
+Lab results (two-node cluster plus qdevice, HA offering `lab-tiny (HA)`, VM `lab-ha01`):
+
+| Test | Result |
+|---|---|
+| Deploy from an HA offering | VM is in Proxmox HA, state started |
+| Stop from CloudStack | Stays stopped (checked after 150 s); Proxmox HA state stopped |
+| Start from CloudStack | Running; Proxmox HA state started |
+| `haenable` off, then on, VM running | Leaves and rejoins Proxmox HA; VM keeps running |
+| `haenable` on for a VM from a no-HA offering | Refused by CloudStack, as before |
+| Guest process killed | Proxmox restarted it in 12 s; CloudStack scheduled nothing |
+| Node killed | Proxmox restarted the VM on the other node in about 3 min; CloudStack followed on the next power report and scheduled nothing |
+| HA resource set to stopped in Proxmox | CloudStack showed Stopped about 2 min later and scheduled no restart |
+| Expunge an HA VM | VM and HA resource both gone |
+
+- "Scheduled nothing" means no rows in `op_ha_work` and no HA lines in the management log.
+- Unit tests: 570 pass (548 on unmodified source for the same files).
+- Found and fixed in the lab: turning HA off and on again quickly left the Proxmox service in an error state, because Proxmox removes a resource in the background. The script now waits for the removal to finish.
+
+Not done or not tested:
+- **Offering change.** `upgradeVmDb` sets the flag from the new offering, but External VMs cannot change offering until step 5. The flag is applied on the next start.
+- **Report back.** The script returns `ha_enabled`, but CloudStack does not read it yet.
+- **Shutdown inside the guest** of an HA VM was not tested.
+- **Adopted VMs.** The lab has no adoption registry, so `setha` on an adopted VM is untested.
+- **Other restart paths.** Host maintenance, host degraded and forced host delete also call `scheduleRestart`, which now returns early for External. They were not exercised.
+
+Before production:
+- **Order matters.** The new script applies CloudStack's flag on every start. Production has about 116 VMs in Proxmox HA with the CloudStack flag off, so the first start of each from CloudStack would try to remove it from Proxmox HA. Set each VM's flag from Proxmox first (the "Existing VMs" item above).
+- **Role.** Add `Sys.Console` to the production `CloudStackExtension` role first. Without it a start that needs to change HA fails. Review what else that privilege allows before granting it.
+- **Jar first, flag second.** With the old jar, an External VM with the flag on makes CloudStack compete with Proxmox HA.
 
 ### Step 5: scale VM
 

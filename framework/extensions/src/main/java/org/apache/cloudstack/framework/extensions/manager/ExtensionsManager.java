@@ -100,4 +100,12 @@ public interface ExtensionsManager extends Manager {
     void updateExtensionResourceMapDetails(final long extensionResourceMapId, final Map<String, String> details);
 
     Answer getInstanceConsole(VirtualMachine vm, Host host);
+
+    /**
+     * Asks the orchestrator extension of an External instance to turn its own HA on or off for the instance.
+     * The extension receives the action {@link #SET_HA_ACTION} with the parameter "enabled".
+     */
+    Answer setInstanceHa(VirtualMachine vm, boolean enabled);
+
+    String SET_HA_ACTION = "setha";
 }

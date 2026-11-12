@@ -145,6 +145,7 @@ import org.apache.cloudstack.framework.async.AsyncCallFuture;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
+import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.framework.jobs.impl.AsyncJobVO;
 import org.apache.cloudstack.framework.messagebus.MessageBus;
 import org.apache.cloudstack.framework.messagebus.PublishScope;
@@ -675,6 +676,9 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
     @Inject
     ExtensionHelper extensionHelper;
+
+    @Inject
+    ExtensionsManager extensionsManager;
 
     @Inject
     ClvmPoolManager clvmPoolManager;
@@ -3423,6 +3427,15 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         }
 
         checkAndUpdateSecurityGroupForVM(securityGroupIdList, vm, networks);
+
+        if (HypervisorType.External.equals(vm.getHypervisorType()) && ha != vm.isHaEnabled()) {
+            // HA for an External instance is done by the orchestrator, so the setting is passed on before it is saved
+            Answer answer = extensionsManager.setInstanceHa(vm, ha);
+            if (answer == null || !answer.getResult()) {
+                throw new CloudRuntimeException(String.format("Unable to set HA to %s for %s on the external system: %s",
+                        ha, vm, answer == null ? "no answer" : answer.getDetails()));
+            }
+        }
 
         _vmDao.updateVM(id, displayName, ha, osTypeId, userData, userDataId,
                 userDataDetails, isDisplayVmEnabled, isDynamicallyScalable,

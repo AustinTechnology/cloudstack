@@ -2274,6 +2274,25 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public Answer setInstanceHa(VirtualMachine vm, boolean enabled) {
+        Pair<Long, Long> clusterAndHostId = virtualMachineManager.findClusterAndHostIdForVm(vm, false);
+        Host host = clusterAndHostId.second() == null ? null : hostDao.findById(clusterAndHostId.second());
+        if (host == null) {
+            logger.error("Unable to find a host to set HA to {} for {}", enabled, vm);
+            return new Answer(null, false, String.format("No host found for the instance: %s", vm.getName()));
+        }
+        VirtualMachineTO virtualMachineTO = virtualMachineManager.toVmTO(new VirtualMachineProfileImpl(vm));
+        RunCustomActionCommand cmd = new RunCustomActionCommand(SET_HA_ACTION);
+        cmd.setVmTO(virtualMachineTO);
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put(ApiConstants.ENABLED, enabled);
+        cmd.setParameters(parameters);
+        cmd.setExternalDetails(getExternalAccessDetails(host, virtualMachineTO.getExternalDetails()));
+        cmd.setWait(AgentManager.Wait.value());
+        return agentMgr.easySend(host.getId(), cmd);
+    }
+
+    @Override
     public Long getExtensionIdForCluster(long clusterId) {
         ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(clusterId,
                 ExtensionResourceMap.ResourceType.Cluster);

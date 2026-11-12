@@ -28,4 +28,12 @@
     <bean id="ExternalHypervisorGuru" class="org.apache.cloudstack.guru.ExternalHypervisorGuru">
         <property name="name" value="ExternalHypervisorGuru" />
     </bean>
+
+    <bean id="ExternalInvestigator" class="org.apache.cloudstack.hypervisor.external.ha.ExternalInvestigator">
+        <property name="name" value="ExternalInvestigator" />
+    </bean>
+
+    <bean id="ExternalFencer" class="org.apache.cloudstack.hypervisor.external.ha.ExternalFencer">
+        <property name="name" value="ExternalFenceBuilder" />
+    </bean>
 </beans>
