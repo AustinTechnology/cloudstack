@@ -94,6 +94,9 @@ public class UserVmJoinDaoImplTest extends GenericDaoBaseWithTagInformationBaseT
     private HostDetailsDao hostDetailsDao;
 
     @Mock
+    private com.cloud.host.dao.HostDao hostDao;
+
+    @Mock
     ExtensionHelper extensionHelper;
 
     private UserVmJoinVO userVm = new UserVmJoinVO();
@@ -199,6 +202,37 @@ public class UserVmJoinDaoImplTest extends GenericDaoBaseWithTagInformationBaseT
         Mockito.when(hostDetailsDao.findDetail(7L, com.cloud.host.Host.HOST_CDROM_MAX_COUNT)).thenReturn(detail);
         Assert.assertEquals(com.cloud.template.TemplateManager.DEFAULT_CDROM_MAX_PER_VM,
                 _userVmJoinDaoImpl.advertisedCdromCap(7L));
+    }
+
+    @Test
+    public void isInstanceScaleSupportedFollowsTheRegisteredClusterExtension() {
+        UserVmJoinVO userVm = Mockito.mock(UserVmJoinVO.class);
+        Mockito.when(userVm.getHostId()).thenReturn(null);
+        Mockito.when(userVm.getLastHostId()).thenReturn(null);
+        Mockito.when(userVm.getClusterId()).thenReturn(7L);
+        Mockito.when(extensionHelper.getExtensionIdForCluster(7L)).thenReturn(4L);
+        Mockito.when(extensionHelper.isInstanceScaleSupported(4L)).thenReturn(true);
+        Assert.assertTrue(_userVmJoinDaoImpl.isInstanceScaleSupported(userVm));
+
+        Mockito.when(extensionHelper.isInstanceScaleSupported(4L)).thenReturn(false);
+        Assert.assertFalse(_userVmJoinDaoImpl.isInstanceScaleSupported(userVm));
+
+        Mockito.when(userVm.getClusterId()).thenReturn(null);
+        Assert.assertFalse(_userVmJoinDaoImpl.isInstanceScaleSupported(userVm));
+    }
+
+    @Test
+    public void instanceScaleSupportUsesLastHostForAStoppedVm() {
+        UserVmJoinVO vm = Mockito.mock(UserVmJoinVO.class);
+        // The join VO stores host_id as primitive long: SQL NULL is exposed as zero.
+        Mockito.when(vm.getHostId()).thenReturn(0L);
+        Mockito.when(vm.getLastHostId()).thenReturn(5L);
+        com.cloud.host.HostVO host = Mockito.mock(com.cloud.host.HostVO.class);
+        Mockito.when(hostDao.findById(5L)).thenReturn(host);
+        Mockito.when(host.getClusterId()).thenReturn(7L);
+        Mockito.when(extensionHelper.getExtensionIdForCluster(7L)).thenReturn(4L);
+        Mockito.when(extensionHelper.isInstanceScaleSupported(4L)).thenReturn(true);
+        Assert.assertTrue(_userVmJoinDaoImpl.isInstanceScaleSupported(vm));
     }
 
     @Test

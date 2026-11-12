@@ -2442,6 +2442,10 @@ public class ExtensionsManagerImplTest {
 
     @Test
     public void scaleInstanceSendsCpuAndMemoryToTheHostOfTheInstance() {
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(4L);
+        doReturn(extension).when(extensionsManager).getExtensionForCluster(1L);
+        doReturn(true).when(extensionsManager).isInstanceScaleSupported(4L);
         VirtualMachine vm = mock(VirtualMachine.class);
         when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
         HostVO host = mock(HostVO.class);
@@ -2459,6 +2463,21 @@ public class ExtensionsManagerImplTest {
         assertEquals(ExtensionsManager.SCALE_ACTION, captor.getValue().getActionName());
         assertEquals(4, captor.getValue().getParameters().get("cpunumber"));
         assertEquals(8192, captor.getValue().getParameters().get("memory"));
+    }
+
+    @Test
+    public void scaleInstanceRefusesAnUndeclaredHostExtensionBeforeSending() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
+        HostVO host = mock(HostVO.class);
+        when(host.getClusterId()).thenReturn(1L);
+        when(hostDao.findById(5L)).thenReturn(host);
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(4L);
+        doReturn(extension).when(extensionsManager).getExtensionForCluster(1L);
+        doReturn(false).when(extensionsManager).isInstanceScaleSupported(4L);
+        assertFalse(extensionsManager.scaleInstance(vm, 4, 8192).getResult());
+        verify(agentMgr, never()).easySend(anyLong(), any());
     }
 
     @Test
@@ -2612,6 +2631,27 @@ public class ExtensionsManagerImplTest {
             assertNull(result.get(ApiConstants.ROLE_NAME));
             assertNull(result.get(ApiConstants.ROLE_TYPE));
         }
+    }
+
+    @Test
+    public void isInstanceScaleSupportedIsTrueOnlyWhenTheExtensionDeclaresIt() {
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extension.getType()).thenReturn(Extension.Type.Orchestrator);
+        when(extension.getState()).thenReturn(Extension.State.Enabled);
+        when(extensionDao.findById(anyLong())).thenReturn(extension);
+        ExtensionDetailsVO declared = mock(ExtensionDetailsVO.class);
+        when(declared.getValue()).thenReturn("true");
+        when(extensionDetailsDao.findDetail(1L, ExtensionHelper.INSTANCE_SCALE_SUPPORTED)).thenReturn(declared);
+        ExtensionDetailsVO declaredFalse = mock(ExtensionDetailsVO.class);
+        when(declaredFalse.getValue()).thenReturn("false");
+        when(extensionDetailsDao.findDetail(2L, ExtensionHelper.INSTANCE_SCALE_SUPPORTED)).thenReturn(declaredFalse);
+        when(extensionDetailsDao.findDetail(3L, ExtensionHelper.INSTANCE_SCALE_SUPPORTED)).thenReturn(null);
+
+        assertTrue(extensionsManager.isInstanceScaleSupported(1L));
+        assertFalse(extensionsManager.isInstanceScaleSupported(2L));
+        assertFalse(extensionsManager.isInstanceScaleSupported(3L));
+        when(extension.getState()).thenReturn(Extension.State.Disabled);
+        assertFalse(extensionsManager.isInstanceScaleSupported(1L));
     }
 
     @Test

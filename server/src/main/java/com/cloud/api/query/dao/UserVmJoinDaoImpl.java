@@ -535,6 +535,9 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
         } else {
             userVmResponse.setDynamicallyScalable(userVm.isDynamicallyScalable());
         }
+        if (Hypervisor.HypervisorType.External.equals(userVm.getHypervisorType())) {
+            userVmResponse.setInstanceScaleSupported(isInstanceScaleSupported(userVm));
+        }
 
         if (userVm.isDeleteProtection() == null) {
             userVmResponse.setDeleteProtection(false);
@@ -578,6 +581,24 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
         LocalDate createdDate = created.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
         LocalDate expiryDate = leaseExpiryDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
         return ChronoUnit.DAYS.between(createdDate, expiryDate);
+    }
+
+    boolean isInstanceScaleSupported(UserVmJoinVO userVm) {
+        Long clusterId = userVm.getClusterId();
+        Long hostId = userVm.getHostId() != null && userVm.getHostId() > 0
+                ? userVm.getHostId() : userVm.getLastHostId();
+        if (hostId != null) {
+            HostVO host = hostDao.findById(hostId);
+            if (host == null) {
+                return false;
+            }
+            clusterId = host.getClusterId();
+        }
+        if (clusterId == null) {
+            return false;
+        }
+        Long extensionId = extensionHelper.getExtensionIdForCluster(clusterId);
+        return extensionId != null && extensionHelper.isInstanceScaleSupported(extensionId);
     }
 
     int effectiveCdromMaxCount(UserVmJoinVO userVm) {

@@ -355,7 +355,12 @@ export default {
           label: 'label.scale.vm',
           docHelp: 'adminguide/virtual_machines.html#how-to-dynamically-scale-cpu-and-ram',
           dataView: true,
-          show: (record) => { return record.hypervisor !== 'External' && (['Stopped'].includes(record.state) || (['Running'].includes(record.state) && record.hypervisor !== 'LXC')) && record.vmtype !== 'sharedfsvm' },
+          show: (record) => {
+            if (record.hypervisor === 'External') {
+              return record.state === 'Stopped' && record.instancescalesupported === true && record.vmtype !== 'sharedfsvm'
+            }
+            return (['Stopped'].includes(record.state) || (['Running'].includes(record.state) && record.hypervisor !== 'LXC')) && record.vmtype !== 'sharedfsvm'
+          },
           disabled: (record) => { return record.state === 'Running' && !record.isdynamicallyscalable },
           popup: true,
           component: shallowRef(defineAsyncComponent(() => import('@/views/compute/ScaleVM.vue')))
