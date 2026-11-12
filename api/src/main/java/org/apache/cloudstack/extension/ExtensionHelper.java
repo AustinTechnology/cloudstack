@@ -41,6 +41,11 @@ public interface ExtensionHelper {
      */
     boolean isInstanceScaleSupported(long extensionId);
 
+    String INSTANCE_NIC_CHANGE_SUPPORTED = "instancenicchangesupported";
+
+    /** Whether this enabled orchestrator supports plugnic and unplugnic instance operations. */
+    boolean isInstanceNicChangeSupported(long extensionId);
+
     /**
      * Network Guru of Network Extension
      */

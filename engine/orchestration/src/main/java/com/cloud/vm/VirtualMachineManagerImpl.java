@@ -4649,11 +4649,20 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         final VirtualMachineProfileImpl vmProfile = new VirtualMachineProfileImpl(vmVO, null, null, null, null);
 
         final DataCenter dc = _entityMgr.findById(DataCenter.class, network.getDataCenterId());
-        final Host host = _hostDao.findById(vm.getHostId());
+        final boolean externalStopped = vm.getHypervisorType() == HypervisorType.External && vm.getState() == State.Stopped;
+        final Long hostId = externalStopped ? findClusterAndHostIdForVm(vm, false).second() : vm.getHostId();
+        final Host host = hostId == null ? null : _hostDao.findById(hostId);
+        if (externalStopped && host == null) {
+            throw new ResourceUnavailableException("No host found for the External instance", DataCenter.class, vm.getDataCenterId());
+        }
         final DeployDestination dest = new DeployDestination(dc, null, null, host);
 
-        if (vm.getState() == State.Running) {
-            final NicProfile nic = _networkMgr.createNicForVm(network, requested, context, vmProfile, true);
+        if (vm.getState() == State.Running || externalStopped) {
+            final NicProfile nic = _networkMgr.createNicForVm(network, requested, context, vmProfile, !externalStopped);
+            if (externalStopped) {
+                nic.setBroadcastUri(network.getBroadcastUri());
+                nic.setIsolationUri(network.getBroadcastUri());
+            }
 
             final HypervisorGuru hvGuru = _hvGuruMgr.getGuru(vmProfile.getVirtualMachine().getHypervisorType());
             final VirtualMachineTO vmTO = hvGuru.implement(vmProfile);
@@ -4664,10 +4673,14 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
             logger.debug("Plugging NIC for Instance {} in Network {}", vm, network);
 
             boolean result = false;
+            boolean outcomeUnknown = externalStopped;
             try {
                 result = plugNic(network, nicTO, vmTO, context, dest);
+                outcomeUnknown = false;
                 if (result) {
-                    _userVmMgr.setupVmForPvlan(true, vm.getHostId(), nic);
+                    if (!externalStopped) {
+                        _userVmMgr.setupVmForPvlan(true, vm.getHostId(), nic);
+                    }
                     logger.debug("Nic is plugged successfully for vm {} in network {}. VM is a part of network now.", vm, network);
                     final long isDefault = nic.isDefaultNic() ? 1 : 0;
 
@@ -4681,7 +4694,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                     return null;
                 }
             } finally {
-                if (!result) {
+                if (!result && !outcomeUnknown) {
                     logger.debug("Removing NIC {} from Instance {} as NIC plug failed on the backend.", nic, vmProfile.getVirtualMachine());
                     _networkMgr.removeNic(vmProfile, _nicsDao.findById(nic.getId()));
                 }
@@ -4742,7 +4755,12 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         final VirtualMachineProfileImpl vmProfile = new VirtualMachineProfileImpl(vmVO, null, null, null, null);
 
         final DataCenter dc = _entityMgr.findById(DataCenter.class, network.getDataCenterId());
-        final Host host = _hostDao.findById(vm.getHostId());
+        final boolean externalStopped = vm.getHypervisorType() == HypervisorType.External && vm.getState() == State.Stopped;
+        final Long hostId = externalStopped ? findClusterAndHostIdForVm(vm, false).second() : vm.getHostId();
+        final Host host = hostId == null ? null : _hostDao.findById(hostId);
+        if (externalStopped && host == null) {
+            throw new ResourceUnavailableException("No host found for the External instance", DataCenter.class, vm.getDataCenterId());
+        }
         final DeployDestination dest = new DeployDestination(dc, null, null, host);
         final HypervisorGuru hvGuru = _hvGuruMgr.getGuru(vmProfile.getVirtualMachine().getHypervisorType());
         final VirtualMachineTO vmTO = hvGuru.implement(vmProfile);
@@ -4751,12 +4769,14 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                 new NicProfile(nic, network, nic.getBroadcastUri(), nic.getIsolationUri(), _networkModel.getNetworkRate(network.getId(), vm.getId()),
                         _networkModel.isSecurityGroupSupportedInNetwork(network), _networkModel.getNetworkTag(vmProfile.getVirtualMachine().getHypervisorType(), network));
 
-        if (vm.getState() == State.Running) {
+        if (vm.getState() == State.Running || externalStopped) {
             final NicTO nicTO = toNicTO(nicProfile, vmProfile.getVirtualMachine().getHypervisorType());
             logger.debug("Un-plugging NIC {} for Instance {} from Network {}.", nic, vm, network);
             final boolean result = unplugNic(network, nicTO, vmTO, context, dest);
             if (result) {
-                _userVmMgr.setupVmForPvlan(false, vm.getHostId(), nicProfile);
+                if (!externalStopped) {
+                    _userVmMgr.setupVmForPvlan(false, vm.getHostId(), nicProfile);
+                }
                 logger.debug("NIC is unplugged successfully for Instance {} in Network {}.", vm, network);
                 final long isDefault = nic.isDefaultNic() ? 1 : 0;
                 UsageEventUtils.publishUsageEvent(EventTypes.EVENT_NETWORK_OFFERING_REMOVE, vm.getAccountId(), vm.getDataCenterId(), vm.getId(),
@@ -5144,7 +5164,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         boolean result = true;
 
         final VMInstanceVO router = _vmDao.findById(vm.getId());
-        if (router.getState() == State.Running) {
+        if (router.getState() == State.Running || (router.getHypervisorType() == HypervisorType.External && router.getState() == State.Stopped)) {
             try {
                 NetworkDetailVO pvlanTypeDetail = networkDetailsDao.findDetail(network.getId(), ApiConstants.ISOLATED_PVLAN_TYPE);
                 if (pvlanTypeDetail != null) {
@@ -5160,6 +5180,10 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                 final PlugNicAnswer plugNicAnswer = cmds.getAnswer(PlugNicAnswer.class);
                 if (plugNicAnswer == null || !plugNicAnswer.getResult()) {
                     logger.warn("Unable to plug nic for vm {}", vm.getName());
+                    if (router.getHypervisorType() == HypervisorType.External &&
+                            (plugNicAnswer == null || (plugNicAnswer.getDetails() != null && plugNicAnswer.getDetails().contains("NIC_OUTCOME_UNKNOWN")))) {
+                        throw new ResourceUnavailableException("External NIC outcome is unknown; allocation retained. Inspect Proxmox before retrying.", Host.class, dest.getHost().getId());
+                    }
                     result = false;
                 }
             } catch (final OperationTimedoutException e) {
@@ -5182,7 +5206,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         boolean result = true;
         final VMInstanceVO router = _vmDao.findById(vm.getId());
 
-        if (router.getState() == State.Running) {
+        if (router.getState() == State.Running || (router.getHypervisorType() == HypervisorType.External && router.getState() == State.Stopped)) {
             UserVmVO userVm = _userVmDao.findById(vm.getId());
             if (userVm != null && userVm.getType() == VirtualMachine.Type.User) {
                 _userVmService.collectVmNetworkStatistics(userVm);

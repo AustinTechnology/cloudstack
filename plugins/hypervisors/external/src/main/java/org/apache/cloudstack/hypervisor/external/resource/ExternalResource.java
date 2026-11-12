@@ -29,6 +29,10 @@ import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 
 import com.cloud.agent.IAgentControl;
 import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.PlugNicAnswer;
+import com.cloud.agent.api.PlugNicCommand;
+import com.cloud.agent.api.UnPlugNicAnswer;
+import com.cloud.agent.api.UnPlugNicCommand;
 import com.cloud.agent.api.CheckHealthAnswer;
 import com.cloud.agent.api.CheckHealthCommand;
 import com.cloud.agent.api.CheckNetworkAnswer;
@@ -177,6 +181,10 @@ public class ExternalResource implements ServerResource {
                 return execute((RunCustomActionCommand) cmd);
             } else if (cmd instanceof CheckVirtualMachineCommand) {
                 return execute((CheckVirtualMachineCommand) cmd);
+            } else if (cmd instanceof PlugNicCommand) {
+                return execute((PlugNicCommand) cmd);
+            } else if (cmd instanceof UnPlugNicCommand) {
+                return execute((UnPlugNicCommand) cmd);
             } else if (cmd instanceof GetVmIpAddressCommand) {
                 return execute((GetVmIpAddressCommand) cmd);
             } else {
@@ -317,6 +325,20 @@ public class ExternalResource implements ServerResource {
             return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
         }
         return externalProvisioner.getInstanceIpAddress(guid, extensionName, extensionRelativePath, cmd);
+    }
+
+    public PlugNicAnswer execute(PlugNicCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return new PlugNicAnswer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        return externalProvisioner.plugInstanceNic(guid, extensionName, extensionRelativePath, cmd);
+    }
+
+    public UnPlugNicAnswer execute(UnPlugNicCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return new UnPlugNicAnswer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        return externalProvisioner.unplugInstanceNic(guid, extensionName, extensionRelativePath, cmd);
     }
 
     public Answer execute(Command cmd) {

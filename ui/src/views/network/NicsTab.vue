@@ -22,7 +22,8 @@
       style="width: 100%; margin-bottom: 10px"
       @click="showAddNicModal"
       :loading="loadingNic"
-      :disabled="!('addNicToVirtualMachine' in $store.getters.apis) || resource.hypervisor === 'External'">
+      v-if="resource.hypervisor !== 'External' || externalNicChangesAllowed"
+      :disabled="!('addNicToVirtualMachine' in $store.getters.apis)">
       <template #icon><plus-outlined /></template> {{ $t('label.network.addvm') }}
     </a-button>
     <NicsTable :resource="resource" :loading="loading">
@@ -66,7 +67,7 @@
           @confirm="removeNIC(record.nic)"
           :okText="$t('label.yes')"
           :cancelText="$t('label.no')"
-          v-if="!record.nic.isdefault && resource.hypervisor !== 'External'"
+          v-if="!record.nic.isdefault && (resource.hypervisor !== 'External' || (externalNicChangesAllowed && record.nic.type === 'L2'))"
         >
           <tooltip-button
             tooltipPlacement="bottom"
@@ -134,7 +135,7 @@
             :placeholder="addNetworkData.apiParams.macaddress.description"
             v-model:value="addNetworkData.macaddress" />
         </a-form-item>
-        <a-form-item name="makedefault" ref="makedefault">
+        <a-form-item v-if="resource.hypervisor !== 'External'" name="makedefault" ref="makedefault">
           <a-checkbox v-model:checked="addNetworkData.makedefault">
             {{ $t('label.make.default') }}
           </a-checkbox>
@@ -338,6 +339,11 @@ export default {
       }
     }
   },
+  computed: {
+    externalNicChangesAllowed () {
+      return this.resource.state === 'Stopped' && this.resource.instancenicchangesupported === true
+    }
+  },
   created () {
     this.vm = this.resource
     this.addNetworkData.apiParams = this.$getApiParams('addNicToVirtualMachine')
@@ -349,8 +355,10 @@ export default {
         showicon: true,
         zoneid: this.vm.zoneid
       }).then(response => {
-        this.addNetworkData.allNetworks = response.listnetworksresponse.network.filter(network => !this.vm.nic.map(nic => nic.networkid).includes(network.id))
-        this.addNetworkData.network = this.addNetworkData.allNetworks[0].id
+        this.addNetworkData.allNetworks = (response.listnetworksresponse.network || []).filter(network =>
+          !this.vm.nic.map(nic => nic.networkid).includes(network.id) &&
+          (this.resource.hypervisor !== 'External' || network.type === 'L2'))
+        this.addNetworkData.network = this.addNetworkData.allNetworks[0]?.id || ''
       })
     },
     fetchSecondaryIPs (nicId) {

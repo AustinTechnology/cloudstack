@@ -377,6 +377,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
     @Param(description = "For an Instance on an External hypervisor, true if its extension can change the CPU and memory of the stopped Instance.")
     private Boolean instanceScaleSupported;
 
+    @SerializedName(ExtensionHelper.INSTANCE_NIC_CHANGE_SUPPORTED)
+    @Param(description = "For an External Instance, true if its extension supports adding and removing NICs.")
+    private Boolean instanceNicChangeSupported;
+
     @SerializedName(ApiConstants.DELETE_PROTECTION)
     @Param(description = "true if vm has delete protection.", since = "4.20.0")
     private boolean deleteProtection;
@@ -1166,6 +1170,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
 
     public void setDynamicallyScalable(Boolean dynamicallyScalable) {
         isDynamicallyScalable = dynamicallyScalable;
+    }
+
+    public void setInstanceNicChangeSupported(Boolean supported) {
+        this.instanceNicChangeSupported = supported;
     }
 
     public Boolean getInstanceScaleSupported() {

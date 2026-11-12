@@ -537,6 +537,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
         }
         if (Hypervisor.HypervisorType.External.equals(userVm.getHypervisorType())) {
             userVmResponse.setInstanceScaleSupported(isInstanceScaleSupported(userVm));
+            userVmResponse.setInstanceNicChangeSupported(isInstanceNicChangeSupported(userVm));
         }
 
         if (userVm.isDeleteProtection() == null) {
@@ -584,21 +585,27 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
     }
 
     boolean isInstanceScaleSupported(UserVmJoinVO userVm) {
+        Long extensionId = getInstanceExtensionId(userVm);
+        return extensionId != null && extensionHelper.isInstanceScaleSupported(extensionId);
+    }
+
+    boolean isInstanceNicChangeSupported(UserVmJoinVO userVm) {
+        Long extensionId = getInstanceExtensionId(userVm);
+        return extensionId != null && extensionHelper.isInstanceNicChangeSupported(extensionId);
+    }
+
+    private Long getInstanceExtensionId(UserVmJoinVO userVm) {
         Long clusterId = userVm.getClusterId();
         Long hostId = userVm.getHostId() != null && userVm.getHostId() > 0
                 ? userVm.getHostId() : userVm.getLastHostId();
         if (hostId != null) {
             HostVO host = hostDao.findById(hostId);
             if (host == null) {
-                return false;
+                return null;
             }
             clusterId = host.getClusterId();
         }
-        if (clusterId == null) {
-            return false;
-        }
-        Long extensionId = extensionHelper.getExtensionIdForCluster(clusterId);
-        return extensionId != null && extensionHelper.isInstanceScaleSupported(extensionId);
+        return clusterId == null ? null : extensionHelper.getExtensionIdForCluster(clusterId);
     }
 
     int effectiveCdromMaxCount(UserVmJoinVO userVm) {

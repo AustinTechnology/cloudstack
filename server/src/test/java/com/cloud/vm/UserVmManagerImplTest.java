@@ -90,6 +90,7 @@ import org.apache.cloudstack.engine.subsystem.api.storage.VolumeDataFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.jobs.impl.AsyncJobVO;
 import org.apache.cloudstack.resourcelimit.Reserver;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
@@ -322,6 +323,9 @@ public class UserVmManagerImplTest {
 
     @Mock
     ExtensionsManager extensionsManager;
+
+    @Mock
+    ExtensionHelper extensionHelper;
 
     @Mock
     private VolumeVO volumeVOMock;
@@ -678,6 +682,30 @@ public class UserVmManagerImplTest {
         Mockito.when(extensionsManager.scaleInstance(userVmVoMock, 4, 8192)).thenReturn(new Answer(null, false, "no"));
 
         assertThrows(CloudRuntimeException.class, () -> userVmManagerImpl.scaleExternalInstance(userVmVoMock, 4, 8192));
+    }
+
+    @Test
+    public void externalNicChangeRejectsRunningBeforeNetworkMutation() {
+        when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+        when(userVmVoMock.getState()).thenReturn(VirtualMachine.State.Running);
+        assertThrows(InvalidParameterValueException.class,
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, null));
+    }
+
+    @Test
+    public void externalNicChangeRejectsUnsupportedNetwork() {
+        when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+        when(userVmVoMock.getState()).thenReturn(VirtualMachine.State.Stopped);
+        Network network = mock(Network.class);
+        when(network.getGuestType()).thenReturn(Network.GuestType.Isolated);
+        assertThrows(InvalidParameterValueException.class,
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network));
+    }
+
+    @Test
+    public void externalNicGateDoesNotChangeNativeHypervisors() {
+        when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.KVM);
+        userVmManagerImpl.validateExternalNicChange(userVmVoMock, null);
     }
 
     @Test

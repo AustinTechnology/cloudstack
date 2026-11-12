@@ -2634,6 +2634,21 @@ public class ExtensionsManagerImplTest {
     }
 
     @Test
+    public void nicChangeCapabilityDefaultsOffAndRequiresEnabledOrchestrator() {
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extension.getType()).thenReturn(Extension.Type.Orchestrator);
+        when(extension.getState()).thenReturn(Extension.State.Enabled);
+        when(extensionDao.findById(4L)).thenReturn(extension);
+        assertFalse(extensionsManager.isInstanceNicChangeSupported(4L));
+        ExtensionDetailsVO detail = mock(ExtensionDetailsVO.class);
+        when(detail.getValue()).thenReturn("true");
+        when(extensionDetailsDao.findDetail(4L, ExtensionHelper.INSTANCE_NIC_CHANGE_SUPPORTED)).thenReturn(detail);
+        assertTrue(extensionsManager.isInstanceNicChangeSupported(4L));
+        when(extension.getState()).thenReturn(Extension.State.Disabled);
+        assertFalse(extensionsManager.isInstanceNicChangeSupported(4L));
+    }
+
+    @Test
     public void isInstanceScaleSupportedIsTrueOnlyWhenTheExtensionDeclaresIt() {
         ExtensionVO extension = mock(ExtensionVO.class);
         when(extension.getType()).thenReturn(Extension.Type.Orchestrator);
