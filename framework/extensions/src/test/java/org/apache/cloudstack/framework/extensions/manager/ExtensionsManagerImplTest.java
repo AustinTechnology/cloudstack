@@ -2441,6 +2441,27 @@ public class ExtensionsManagerImplTest {
     }
 
     @Test
+    public void scaleInstanceSendsCpuAndMemoryToTheHostOfTheInstance() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
+        HostVO host = mock(HostVO.class);
+        when(host.getId()).thenReturn(5L);
+        when(host.getClusterId()).thenReturn(1L);
+        when(hostDao.findById(5L)).thenReturn(host);
+        when(virtualMachineManager.toVmTO(any())).thenReturn(mock(VirtualMachineTO.class));
+        Answer expectedAnswer = mock(Answer.class);
+        ArgumentCaptor<RunCustomActionCommand> captor = ArgumentCaptor.forClass(RunCustomActionCommand.class);
+        when(agentMgr.easySend(eq(5L), captor.capture())).thenReturn(expectedAnswer);
+
+        Answer result = extensionsManager.scaleInstance(vm, 4, 8192);
+
+        assertEquals(expectedAnswer, result);
+        assertEquals(ExtensionsManager.SCALE_ACTION, captor.getValue().getActionName());
+        assertEquals(4, captor.getValue().getParameters().get("cpunumber"));
+        assertEquals(8192, captor.getValue().getParameters().get("memory"));
+    }
+
+    @Test
     public void setInstanceHaFailsWhenTheInstanceHasNoHost() {
         VirtualMachine vm = mock(VirtualMachine.class);
         when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(null, null));

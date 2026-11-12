@@ -1445,6 +1445,8 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
             DiskOfferingVO newDiskOffering = _diskOfferingDao.findById(newServiceOffering.getDiskOfferingId());
             changeDiskOfferingForRootVolume(vmId, newDiskOffering, customParameters, vmInstance.getDataCenterId());
 
+            scaleExternalInstance(vmInstance, newCpu, newMemory);
+
             _itMgr.upgradeVmDb(vmId, newServiceOffering, currentServiceOffering);
 
             // Increment or decrement CPU and Memory count accordingly.
@@ -1457,6 +1459,21 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
         } finally {
             ReservationHelper.closeAll(reservations);
+        }
+    }
+
+    /**
+     * The CPU and memory of an External instance are held by its orchestrator, so they are changed there
+     * before the new offering is saved.
+     */
+    protected void scaleExternalInstance(VirtualMachine vm, int cpuNumber, int memoryMib) {
+        if (!HypervisorType.External.equals(vm.getHypervisorType())) {
+            return;
+        }
+        Answer answer = extensionsManager.scaleInstance(vm, cpuNumber, memoryMib);
+        if (answer == null || !answer.getResult()) {
+            throw new CloudRuntimeException(String.format("Unable to change CPU and memory of %s on the external system: %s",
+                    vm, answer == null ? "no answer" : answer.getDetails()));
         }
     }
 
@@ -2117,12 +2134,6 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         VirtualMachine vm = (VirtualMachine) this._entityMgr.findById(VirtualMachine.class, vmId);
         if (vm == null) {
             throw new InvalidParameterValueException("Unable to find VM's UUID");
-        }
-        if (Hypervisor.HypervisorType.External.equals(vm.getHypervisorType())) {
-            logger.error("Scale VM not supported for {} as it is {} hypervisor instance",
-                    vm, Hypervisor.HypervisorType.External.name());
-            throw new InvalidParameterValueException(String.format("Operation not supported for instance: %s",
-                    vm.getName()));
         }
         CallContext.current().setEventDetails("Vm Id: " + vm.getUuid());
 

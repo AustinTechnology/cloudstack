@@ -108,4 +108,12 @@ public interface ExtensionsManager extends Manager {
     Answer setInstanceHa(VirtualMachine vm, boolean enabled);
 
     String SET_HA_ACTION = "setha";
+
+    /**
+     * Asks the orchestrator extension of a stopped External instance to change its CPU count and memory.
+     * The extension receives the action {@link #SCALE_ACTION} with the parameters "cpunumber" and "memory" (in MiB).
+     */
+    Answer scaleInstance(VirtualMachine vm, int cpuNumber, int memoryMib);
+
+    String SCALE_ACTION = "scale";
 }
