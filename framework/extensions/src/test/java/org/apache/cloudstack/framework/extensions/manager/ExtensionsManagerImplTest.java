@@ -2649,6 +2649,24 @@ public class ExtensionsManagerImplTest {
     }
 
     @Test
+    public void nicHotplugRequiresBothCapabilitiesAndEnabledOrchestrator() {
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extension.getType()).thenReturn(Extension.Type.Orchestrator);
+        when(extension.getState()).thenReturn(Extension.State.Enabled);
+        when(extensionDao.findById(4L)).thenReturn(extension);
+        ExtensionDetailsVO enabled = mock(ExtensionDetailsVO.class);
+        when(enabled.getValue()).thenReturn("true");
+        when(extensionDetailsDao.findDetail(4L, ExtensionHelper.INSTANCE_NIC_HOTPLUG_SUPPORTED)).thenReturn(enabled);
+        assertFalse(extensionsManager.isInstanceNicHotplugSupported(4L));
+        when(extensionDetailsDao.findDetail(4L, ExtensionHelper.INSTANCE_NIC_CHANGE_SUPPORTED)).thenReturn(enabled);
+        assertTrue(extensionsManager.isInstanceNicHotplugSupported(4L));
+        when(enabled.getValue()).thenReturn("false");
+        assertFalse(extensionsManager.isInstanceNicHotplugSupported(4L));
+        when(extension.getState()).thenReturn(Extension.State.Disabled);
+        assertFalse(extensionsManager.isInstanceNicHotplugSupported(4L));
+    }
+
+    @Test
     public void isInstanceScaleSupportedIsTrueOnlyWhenTheExtensionDeclaresIt() {
         ExtensionVO extension = mock(ExtensionVO.class);
         when(extension.getType()).thenReturn(Extension.Type.Orchestrator);

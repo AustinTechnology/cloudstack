@@ -213,17 +213,17 @@ Not done:
 - Adopted VMs could not be tested (no adoption registry in the lab). Correction after tracing `start()`: the CPU/RAM manifest comparison runs only for the initial `bound` adoption acknowledgement, not ordinary `managed` starts. Adopted scaling is an untested path, not a demonstrated later-start manifest mismatch.
 - The existing scaling behavior still retains a valid lower `vcpus` value. This UI follow-up does not change CPU hotplug or balloon policy.
 
-### Step 6: NIC add and remove (stopped tagged-L2 scope implemented in lab, 12 Nov 2026)
+### Step 6: NIC add and remove (stopped and online tagged-L2 scope implemented in lab, 12 Nov 2026)
 
 Scope and implementation:
-- Stopped External VMs on tagged L2 networks only. Running requests and other network types are rejected before allocation/deallocation. No live hotplug, default-NIC changes, or DHCP-option configuration is introduced.
+- External VMs on tagged L2 networks, stopped or running. Online operations additionally require the default-false extension detail `instancenichotplugsupported=true`, with the base NIC capability also enabled. Other/transitional states, default-NIC changes and service-network changes remain unsupported.
 - Explicit `PlugNicCommand` / `UnPlugNicCommand` handlers return typed answers and rebuild VM/host/cluster access context. The NIC parameter carries the exact MAC, device ID, and VLAN URI.
 - Stock stopped-VM orchestration only changes CloudStack metadata. It now dispatches External NIC changes using the last host before reporting success, while native-hypervisor behavior stays unchanged.
-- Default-false extension detail `instancenicchangesupported=true` gates both API entry and provider dispatch. The VM response exposes the boolean using the registered current/last-host cluster extension. The UI shows add/remove only for supported stopped External VMs, retains permissions/default-NIC protection, limits network choices to L2, and hides Make default.
-- Proxmox script verifies stopped state, uniquely resolves current node, validates MAC/VLAN/host bridge, uses a configuration-digest guard, checks pending state and reads back applied configuration. Removal matches MAC rather than CloudStack's device index. A verified already-absent MAC is read-only success; ambiguity is refused.
+- Default-false extension detail `instancenicchangesupported=true` gates both API entry and provider dispatch. The VM response exposes the boolean using the registered current/last-host cluster extension. The UI shows add/remove for supported stopped External VMs and for running VMs with the additional hotplug capability, retains permissions/default-NIC protection, limits network choices to L2, and hides Make default.
+- Proxmox script verifies the expected power state, uniquely resolves current node, validates MAC/VLAN/host bridge, uses a configuration-digest guard, checks pending state and reads back applied configuration. Removal matches MAC rather than CloudStack's device index. A verified already-absent MAC is read-only success; ambiguity is refused.
 - Unknown add outcomes retain the CloudStack NIC allocation and fail the job rather than automatically deleting metadata or issuing compensating mutations. Definite pre-write failure follows cleanup. Operator inspection is required before any retry. A retained NIC can be removed through the normal API after inspecting the provider state.
 
-Verified in the isolated lab:
+Initial stopped-scope verification in the isolated lab (before online follow-up below):
 - 593 Java tests, 9 offline shell-entrypoint tests, 6 UI predicate cases; UI build succeeds. Same-compiler comparison shows changes only in intended methods.
 - Running add/remove rejected; capability false rejected; default-NIC removal rejected.
 - Added NIC MAC `02:00:00:64:01:01`, bridge `vmbr1`, VLAN 101. CloudStack and Proxmox matched; after start the guest agent reported the new NIC as `ens19` while the original `eth0` kept `10.100.0.5`.
@@ -234,8 +234,24 @@ Verified in the isolated lab:
 Limits / rollout:
 - No production changes. Production NIC/IP sync is not present in this lab; concurrent writer coordination remains a rollout requirement.
 - Adopted NIC operations retain the managed-claim check but have not been exercised against a live adoption registry. No manifest or registry contract changes.
-- Linux bridge/tagged-L2 path tested; running hotplug, untagged networks, routed/service networks and OVS-specific bridge handling are outside this initial scope.
+- Linux bridge/tagged-L2 path tested on a Debian guest, including online hotplug. Untagged networks, routed/service networks, OVS-specific bridge handling and other guest operating systems are not validated.
 - Browser tool cannot route to the lab. UI build/predicate and HTTP asset checks are separate from rendered click-through verification, which remains outstanding.
+
+#### Online NIC follow-up (12 Nov 2026)
+
+- VM response and UI expose `instancenichotplugsupported`. API and provider dispatch both require this additional capability for Running VMs; older stopped-only extensions are not implicitly enabled for hotplug.
+- Typed NIC actions carry `expectedpowerstate`. The provider must remain in that state before and after the write, with no configuration lock, no pending NIC changes, and network hotplug enabled for running guests. No forced stop/restart or implicit hotplug-setting change.
+- Traced PVE 9's `QemuServer.pm`: current NIC config is committed after `qemu_deviceaddverify` / `qemu_devicedelverify`; hotplug errors leave pending changes. The script verifies current configuration and absence of pending NIC changes, not merely a successful PUT response.
+- The running allocation path supplies L2 broadcast/isolation URIs and returns a typed failure for unsupported persistent-network setup rather than a misleading success. Native hypervisor behavior is retained.
+- Unknown running-add outcomes retain NIC allocations, extending the stopped-path protection. Definite pre-write failures still clean up metadata.
+
+Verification:
+- 600 Java tests pass, 13 shell tests pass, 9 UI predicate cases pass, and production UI build succeeds. Same-compiler comparison confines substantive changes to intended methods; rebuilt jar retains every entry and changes no non-class resources.
+- Online CloudStack add: guest immediately sees `ens19` / `02:00:00:64:01:01` on VLAN101. Online remove: interface disappears from the guest and both management systems. QEMU PID `186438` and guest boot ID `4c8da0d1-3732-4e0c-9784-3fba240526af` remained unchanged through all tests; original NIC/IP retained.
+- Missing/false online capability rejects add/remove. Default NIC removal rejects. Real Proxmox `hotplug=0` rejects add with no stray NIC allocation/config; original hotplug setting restored.
+- Lost-success injection on a real online add fails the API but retains the NIC in CloudStack, Proxmox and the guest. Read both systems, restore wrapper, explicitly remove online; no automatic rollback/replay. Guest restored to its original one NIC, no pending config, both lab VMs running, HA work count zero.
+- Live jar `554dd7ed60b935391b147032ff072ba1ecd7f969033f0428d1be0636be43ac5e`; script `c0dc06f034664c2fe3d85e73b85c040697535612d53334fe0936586e081314d1`. Script backup `/root/ext-backup/proxmox-before-hotplug.sh`; prior jar remains `/opt/acs-build/step6/cloudstack-4.23.0.0.jar`. UI backup `before-hotplug-ui-v2`.
+- Lab only. No production rollout, Windows guest trial, full browser click-through or adopted-registry validation claimed.
 
 ### Step 7: let CloudStack pull a VM's real configuration
 

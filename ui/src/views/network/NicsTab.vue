@@ -341,7 +341,9 @@ export default {
   },
   computed: {
     externalNicChangesAllowed () {
-      return this.resource.state === 'Stopped' && this.resource.instancenicchangesupported === true
+      return this.resource.instancenicchangesupported === true &&
+        (this.resource.state === 'Stopped' ||
+          (this.resource.state === 'Running' && this.resource.instancenichotplugsupported === true))
     }
   },
   created () {

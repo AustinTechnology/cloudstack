@@ -1204,6 +1204,12 @@ public class ExternalPathPayloadProvisionerTest {
     @Test
     public void nicChangePassesExactMacDeviceAndVlanWithVmAccessContext() {
         UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
+        when(userVm.getState()).thenReturn(VirtualMachine.State.Stopped);
+        when(userVm.getHostId()).thenReturn(null);
+        when(userVm.getLastHostId()).thenReturn(9L);
+        HostVO host = hostDao.findByGuid("External:guid");
+        when(host.getId()).thenReturn(9L);
+        when(host.getClusterId()).thenReturn(3L);
         VirtualMachineTO vmTO = mock(VirtualMachineTO.class);
         doReturn(vmTO).when(provisioner).getVirtualMachineTO(userVm);
         Extension extension = mock(Extension.class);
@@ -1225,6 +1231,26 @@ public class ExternalPathPayloadProvisionerTest {
         assertEquals("02:00:00:00:00:11", nicData.get("mac"));
         assertEquals(2, nicData.get("deviceId"));
         assertEquals("vlan://101", nicData.get("broadcastUri"));
+        assertEquals("stopped", parameters.get("expectedpowerstate"));
+
+        when(userVm.getState()).thenReturn(VirtualMachine.State.Running);
+        when(userVm.getHostId()).thenReturn(9L);
+        assertFalse(provisioner.plugInstanceNic("External:guid", "test-extension", "test-extension.sh",
+                new PlugNicCommand(nic, "i-2-1-VM", VirtualMachine.Type.User)).getResult());
+        when(extensionHelper.isInstanceNicHotplugSupported(4L)).thenReturn(true);
+        assertTrue(provisioner.plugInstanceNic("External:guid", "test-extension", "test-extension.sh",
+                new PlugNicCommand(nic, "i-2-1-VM", VirtualMachine.Type.User)).getResult());
+        parameters = (Map)payload.getValue().get("parameters");
+        assertEquals("running", parameters.get("expectedpowerstate"));
+        doReturn(new Pair<>(false, "Timeout")).when(provisioner).executeExternalCommand(
+                eq("test-extension"), eq("plugnic"), anyMap(), anyInt(), anyString(), anyString());
+        PlugNicAnswer timeout = provisioner.plugInstanceNic("External:guid", "test-extension", "test-extension.sh",
+                new PlugNicCommand(nic, "i-2-1-VM", VirtualMachine.Type.User));
+        assertFalse(timeout.getResult());
+        assertTrue(timeout.getDetails().contains("NIC_OUTCOME_UNKNOWN"));
+        when(userVm.getHostId()).thenReturn(10L);
+        assertFalse(provisioner.plugInstanceNic("External:guid", "test-extension", "test-extension.sh",
+                new PlugNicCommand(nic, "i-2-1-VM", VirtualMachine.Type.User)).getResult());
     }
 
     @Test

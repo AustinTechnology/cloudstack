@@ -381,6 +381,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
     @Param(description = "For an External Instance, true if its extension supports adding and removing NICs.")
     private Boolean instanceNicChangeSupported;
 
+    @SerializedName(ExtensionHelper.INSTANCE_NIC_HOTPLUG_SUPPORTED)
+    @Param(description = "For an External Instance, true if its extension supports online NIC changes.")
+    private Boolean instanceNicHotplugSupported;
+
     @SerializedName(ApiConstants.DELETE_PROTECTION)
     @Param(description = "true if vm has delete protection.", since = "4.20.0")
     private boolean deleteProtection;
@@ -1174,6 +1178,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
 
     public void setInstanceNicChangeSupported(Boolean supported) {
         this.instanceNicChangeSupported = supported;
+    }
+
+    public void setInstanceNicHotplugSupported(Boolean supported) {
+        this.instanceNicHotplugSupported = supported;
     }
 
     public Boolean getInstanceScaleSupported() {

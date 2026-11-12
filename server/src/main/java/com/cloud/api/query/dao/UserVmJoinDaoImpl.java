@@ -538,6 +538,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
         if (Hypervisor.HypervisorType.External.equals(userVm.getHypervisorType())) {
             userVmResponse.setInstanceScaleSupported(isInstanceScaleSupported(userVm));
             userVmResponse.setInstanceNicChangeSupported(isInstanceNicChangeSupported(userVm));
+            userVmResponse.setInstanceNicHotplugSupported(isInstanceNicHotplugSupported(userVm));
         }
 
         if (userVm.isDeleteProtection() == null) {
@@ -592,6 +593,17 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
     boolean isInstanceNicChangeSupported(UserVmJoinVO userVm) {
         Long extensionId = getInstanceExtensionId(userVm);
         return extensionId != null && extensionHelper.isInstanceNicChangeSupported(extensionId);
+    }
+
+    boolean isInstanceNicHotplugSupported(UserVmJoinVO userVm) {
+        Long hostId = userVm.getState() == VirtualMachine.State.Running ? userVm.getHostId() :
+                (userVm.getHostId() != null && userVm.getHostId() > 0 ? userVm.getHostId() : userVm.getLastHostId());
+        if (hostId == null || hostId <= 0) {
+            return false;
+        }
+        HostVO host = hostDao.findById(hostId);
+        Long extensionId = host == null || host.getClusterId() == null ? null : extensionHelper.getExtensionIdForCluster(host.getClusterId());
+        return extensionId != null && extensionHelper.isInstanceNicHotplugSupported(extensionId);
     }
 
     private Long getInstanceExtensionId(UserVmJoinVO userVm) {

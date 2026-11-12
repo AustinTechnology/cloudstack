@@ -689,9 +689,21 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         if (ObjectUtils.anyNull(host, userVm, nic)) {
             return new Pair<>(false, "Host, instance or NIC not found");
         }
-        Extension extension = extensionHelper.getExtensionForCluster(host.getClusterId());
+        Extension extension = host.getClusterId() == null ? null : extensionHelper.getExtensionForCluster(host.getClusterId());
         if (extension == null || !extensionHelper.isInstanceNicChangeSupported(extension.getId())) {
             return new Pair<>(false, "The instance's extension does not support NIC changes.");
+        }
+        VirtualMachine.State state = userVm.getState();
+        if (state != VirtualMachine.State.Stopped && state != VirtualMachine.State.Running) {
+            return new Pair<>(false, "External NIC changes require a stopped or running instance.");
+        }
+        if (state == VirtualMachine.State.Running && !extensionHelper.isInstanceNicHotplugSupported(extension.getId())) {
+            return new Pair<>(false, "The instance's extension does not support online NIC changes.");
+        }
+        Long vmHostId = state == VirtualMachine.State.Running ? userVm.getHostId() :
+                (userVm.getHostId() != null ? userVm.getHostId() : userVm.getLastHostId());
+        if (vmHostId == null || !vmHostId.equals(host.getId())) {
+            return new Pair<>(false, "The instance is not assigned to this host.");
         }
         VirtualMachineTO vmTO = getVirtualMachineTO(userVm);
         Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
@@ -701,7 +713,8 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         nicDetails.put("mac", nic.getMac());
         nicDetails.put("deviceId", nic.getDeviceId());
         nicDetails.put("broadcastUri", nic.getBroadcastUri() == null ? null : nic.getBroadcastUri().toString());
-        payload.put(ApiConstants.PARAMETERS, Map.of("nic", nicDetails));
+        payload.put(ApiConstants.PARAMETERS, Map.of("nic", nicDetails, "expectedpowerstate",
+                state == VirtualMachine.State.Running ? "running" : "stopped"));
         Pair<Boolean, String> result = executeExternalCommand(extensionName, action, payload, wait,
                 "Failed to change NIC on the external system", extensionPath);
         if (!result.first() && "Timeout".equals(result.second())) {

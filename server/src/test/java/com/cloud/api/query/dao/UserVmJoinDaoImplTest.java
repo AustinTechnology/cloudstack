@@ -236,6 +236,26 @@ public class UserVmJoinDaoImplTest extends GenericDaoBaseWithTagInformationBaseT
     }
 
     @Test
+    public void nicHotplugCapabilityUsesActualCurrentOrLastHost() {
+        UserVmJoinVO vm = Mockito.mock(UserVmJoinVO.class);
+        Mockito.when(vm.getHostId()).thenReturn(0L);
+        Mockito.when(vm.getLastHostId()).thenReturn(5L);
+        Mockito.when(vm.getState()).thenReturn(com.cloud.vm.VirtualMachine.State.Stopped);
+        com.cloud.host.HostVO host = Mockito.mock(com.cloud.host.HostVO.class);
+        Mockito.when(hostDao.findById(5L)).thenReturn(host);
+        Mockito.when(host.getClusterId()).thenReturn(7L);
+        Mockito.when(extensionHelper.getExtensionIdForCluster(7L)).thenReturn(4L);
+        Mockito.when(extensionHelper.isInstanceNicHotplugSupported(4L)).thenReturn(true);
+        Assert.assertTrue(_userVmJoinDaoImpl.isInstanceNicHotplugSupported(vm));
+        Mockito.when(vm.getState()).thenReturn(com.cloud.vm.VirtualMachine.State.Running);
+        Assert.assertFalse(_userVmJoinDaoImpl.isInstanceNicHotplugSupported(vm));
+        Mockito.when(vm.getHostId()).thenReturn(5L);
+        Assert.assertTrue(_userVmJoinDaoImpl.isInstanceNicHotplugSupported(vm));
+        Mockito.when(hostDao.findById(5L)).thenReturn(null);
+        Assert.assertFalse(_userVmJoinDaoImpl.isInstanceNicHotplugSupported(vm));
+    }
+
+    @Test
     public void effectiveCdromMaxCountClampsToHypervisorCap() {
         UserVmJoinVO userVm = Mockito.mock(UserVmJoinVO.class);
         Mockito.when(userVm.getHostId()).thenReturn(7L);

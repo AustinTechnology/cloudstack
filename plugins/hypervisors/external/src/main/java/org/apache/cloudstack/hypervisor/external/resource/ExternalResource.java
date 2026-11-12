@@ -55,6 +55,8 @@ import com.cloud.agent.api.PingRoutingCommand;
 import com.cloud.agent.api.PingTestCommand;
 import com.cloud.agent.api.PrepareExternalProvisioningAnswer;
 import com.cloud.agent.api.PrepareExternalProvisioningCommand;
+import com.cloud.agent.api.SetupPersistentNetworkAnswer;
+import com.cloud.agent.api.SetupPersistentNetworkCommand;
 import com.cloud.agent.api.ReadyAnswer;
 import com.cloud.agent.api.ReadyCommand;
 import com.cloud.agent.api.RebootAnswer;
@@ -159,6 +161,9 @@ public class ExternalResource implements ServerResource {
                 return execute((CheckHealthCommand) cmd);
             } else if (cmd instanceof CheckNetworkCommand) {
                 return execute((CheckNetworkCommand)cmd);
+            } else if (cmd instanceof SetupPersistentNetworkCommand) {
+                return new SetupPersistentNetworkAnswer((SetupPersistentNetworkCommand)cmd, false,
+                        "External network setup is managed outside CloudStack");
             }else if (cmd instanceof CleanupNetworkRulesCmd) {
                 return execute((CleanupNetworkRulesCmd) cmd);
             } else if (cmd instanceof GetVmStatsCommand) {
@@ -191,6 +196,14 @@ public class ExternalResource implements ServerResource {
                 return execute(cmd);
             }
         } catch (IllegalArgumentException e) {
+            // The exception may have occurred after dispatch. Preserve allocations on an
+            // ambiguous NIC result, and return the typed answer expected by orchestration.
+            if (cmd instanceof PlugNicCommand) {
+                return new PlugNicAnswer((PlugNicCommand)cmd, false, "NIC_OUTCOME_UNKNOWN: " + e.getMessage());
+            }
+            if (cmd instanceof UnPlugNicCommand) {
+                return new UnPlugNicAnswer((UnPlugNicCommand)cmd, false, "NIC_OUTCOME_UNKNOWN: " + e.getMessage());
+            }
             return new Answer(cmd, false, e.getMessage());
         }
     }
