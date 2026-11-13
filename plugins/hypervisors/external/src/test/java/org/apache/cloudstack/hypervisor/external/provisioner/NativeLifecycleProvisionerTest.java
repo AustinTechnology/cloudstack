@@ -106,12 +106,14 @@ public class NativeLifecycleProvisionerTest {
 
     @Test public void readonlyRequiresManagedWithoutLease() throws Exception {
         when(registry.validatedState(any())).thenReturn("managed");
-        Pair<Boolean, String> result = provisioner.executeExternalCommand("test", "status", payload, 5,
-                "test", script("printf '%s' '{\"status\":\"success\"}'").toString());
-        assertTrue(result.first());
-        Map<?, ?> context = (Map<?, ?>) provisioner.observed.get("native_adoption_context");
-        assertEquals("managed", context.get("stored_state"));
-        assertFalse(context.containsKey("lease_id"));
+        for (String action : new String[] {"status", "ListSnapshots"}) {
+            Pair<Boolean, String> result = provisioner.executeExternalCommand("test", action, payload, 5,
+                    "test", script("printf '%s' '{\"status\":\"success\"}'").toString());
+            assertTrue(result.first());
+            Map<?, ?> context = (Map<?, ?>) provisioner.observed.get("native_adoption_context");
+            assertEquals("managed", context.get("stored_state"));
+            assertFalse(context.containsKey("lease_id"));
+        }
         verify(registry, never()).acquire(any(), anyString());
     }
 

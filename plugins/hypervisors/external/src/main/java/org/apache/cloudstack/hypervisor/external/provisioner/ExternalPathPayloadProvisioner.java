@@ -175,7 +175,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             case "RestoreSnapshot": return "restore_snapshot";
             case "DeleteSnapshot": return "delete_snapshot";
             case "start": case "stop": case "reboot": case "setha": case "scale": case "plugnic": case "unplugnic": return action;
-            case "status": case "getconfig": case "getipaddress": return "";
+            case "status": case "getconfig": case "getipaddress": case "ListSnapshots": return "";
             default: throw new IllegalArgumentException("Native adoption does not support action: " + action);
         }
     }
