@@ -541,6 +541,27 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         }
     }
 
+    /** The power sync sends a stop after the provider has already reported the instance off.
+     * Nothing has to change at the provider then, so no operation lease is taken. Without this
+     * a retained lease refuses that stop and CloudStack keeps showing a stopped instance as Running.
+     * The retained lease itself is untouched and still fences every lifecycle operation. */
+    protected boolean nativeAdoptedInstanceAlreadyOff(String hostGuid, String extensionName, String extensionPath, StopCommand cmd) {
+        Map<String, Map<String, String>> details = cmd.getExternalDetails();
+        if (!cmd.checkBeforeCleanup() || details == null || cmd.getVirtualMachine() == null) { return false; }
+        Map<String, String> host = details.get("host");
+        Map<String, String> vm = details.get(ApiConstants.VIRTUAL_MACHINE);
+        if (host == null || vm == null || !"true".equals(host.get(NATIVE_ADOPTION_LIFECYCLE))
+                || !"true".equals(host.get(NATIVE_ADOPTION_STATUS)) || !"true".equals(vm.get("adopt_existing"))) {
+            return false;
+        }
+        HostVO hostVO = hostDao.findByGuid(hostGuid);
+        if (hostVO == null) { return false; }
+        Map<String, HostVmStateReportEntry> states = getVmPowerStates(hostVO,
+                extensionsManager.getExternalAccessDetails(hostVO, null), extensionName, extensionPath);
+        HostVmStateReportEntry entry = states == null ? null : states.get(cmd.getVirtualMachine().getName());
+        return entry != null && VirtualMachine.PowerState.PowerOff.equals(entry.getState());
+    }
+
     @Override
     public StopAnswer stopInstance(String hostName, String extensionName, String extensionRelativePath,
                            StopCommand cmd) {
@@ -549,6 +570,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             return new StopAnswer(cmd, getExtensionConfigureError(extensionName, hostName), false);
         }
         logger.debug("Executing stop command on the external provisioner");
+        if (nativeAdoptedInstanceAlreadyOff(hostName, extensionName, extensionPath, cmd)) {
+            return new StopAnswer(cmd, null, true);
+        }
         VirtualMachineTO virtualMachineTO = cmd.getVirtualMachine();
         String vmUUID = cmd.getVirtualMachine().getUuid();
         logger.debug("Executing stop command in the external system for the VM {}", vmUUID);

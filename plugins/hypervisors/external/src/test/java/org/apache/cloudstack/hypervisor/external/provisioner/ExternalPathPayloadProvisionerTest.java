@@ -32,6 +32,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.File;
@@ -469,6 +471,46 @@ public class ExternalPathPayloadProvisionerTest {
         StopAnswer answer = provisioner.stopInstance("host-name", "test-extension", "test-extension.sh", cmd);
 
         assertTrue(answer.getResult());
+    }
+
+    private StopCommand powerSyncStopOfNativeAdoptedInstance(VirtualMachine.PowerState reported) {
+        StopCommand cmd = mock(StopCommand.class);
+        VirtualMachineTO vmTO = mock(VirtualMachineTO.class);
+        when(vmTO.getName()).thenReturn("i-2-6-VM");
+        when(cmd.getVirtualMachine()).thenReturn(vmTO);
+        when(cmd.checkBeforeCleanup()).thenReturn(true);
+        Map<String, Map<String, String>> details = new HashMap<>();
+        details.put("host", Map.of("native_adoption_lifecycle", "true", "native_adoption_status", "true"));
+        details.put("virtualmachine", Map.of("adopt_existing", "true"));
+        when(cmd.getExternalDetails()).thenReturn(details);
+        HostVO host = mock(HostVO.class);
+        when(hostDao.findByGuid("host-guid")).thenReturn(host);
+        Map<String, HostVmStateReportEntry> states = new HashMap<>();
+        states.put("i-2-6-VM", new HostVmStateReportEntry(reported, "host-1"));
+        doReturn(states).when(provisioner).getVmPowerStates(eq(host), any(), anyString(), anyString());
+        return cmd;
+    }
+
+    @Test
+    public void powerSyncStopOfNativeAdoptedInstanceThatIsOffSendsNoStop() {
+        StopCommand cmd = powerSyncStopOfNativeAdoptedInstance(VirtualMachine.PowerState.PowerOff);
+
+        StopAnswer answer = provisioner.stopInstance("host-guid", "test-extension", "test-extension.sh", cmd);
+
+        assertTrue(answer.getResult());
+        verify(provisioner, never()).executeExternalCommand(anyString(), eq("stop"), anyMap(), anyInt(), anyString(), anyString());
+    }
+
+    @Test
+    public void powerSyncStopOfNativeAdoptedInstanceThatIsOnStillStops() {
+        StopCommand cmd = powerSyncStopOfNativeAdoptedInstance(VirtualMachine.PowerState.PowerOn);
+        when(cmd.getVirtualMachine().getUuid()).thenReturn("test-uuid");
+        doReturn(new Pair<>(true, "success")).when(provisioner)
+            .executeExternalCommand(anyString(), anyString(), anyMap(), anyInt(), anyString(), anyString());
+
+        assertTrue(provisioner.stopInstance("host-guid", "test-extension", "test-extension.sh", cmd).getResult());
+
+        verify(provisioner).executeExternalCommand(anyString(), eq("stop"), anyMap(), anyInt(), anyString(), anyString());
     }
 
     @Test
