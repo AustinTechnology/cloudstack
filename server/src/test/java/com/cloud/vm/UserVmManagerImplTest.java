@@ -4674,4 +4674,17 @@ public class UserVmManagerImplTest {
                 userVmManagerImpl.verifyVmLimits(userVmVoMock, customParameters));
         Assert.assertTrue(ex.getMessage().startsWith("The CPU speed of this offering"));
     }
+
+    @Test
+    public void validateRootDiskResizeAcceptsTemplateWithoutSize() {
+        VMTemplateVO templateWithoutSize = Mockito.mock(VMTemplateVO.class);
+        Mockito.when(templateWithoutSize.getSize()).thenReturn(null);
+        Map<String, String> parameters = new HashMap<>();
+        parameters.put(com.cloud.vm.VmDetailConstants.ROOT_DISK_SIZE, "1");
+
+        userVmManagerImpl.validateRootDiskResize(com.cloud.hypervisor.Hypervisor.HypervisorType.External, 1L,
+                templateWithoutSize, null, parameters);
+
+        Assert.assertEquals("1", parameters.get(com.cloud.vm.VmDetailConstants.ROOT_DISK_SIZE));
+    }
 }
