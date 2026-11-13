@@ -36,4 +36,20 @@
     <bean id="ExternalFencer" class="org.apache.cloudstack.hypervisor.external.ha.ExternalFencer">
         <property name="name" value="ExternalFenceBuilder" />
     </bean>
+    <bean id="ExternalDiscoveryManager" class="org.apache.cloudstack.hypervisor.external.discovery.ExternalDiscoveryManager">
+        <property name="name" value="ExternalDiscoveryManager" />
+    </bean>
+
+    <bean id="ExternalVmRefreshManager" class="org.apache.cloudstack.hypervisor.external.refresh.ExternalVmRefreshManager">
+        <property name="name" value="ExternalVmRefreshManager" />
+    </bean>
+    <bean id="NativeObservationBindingResolver" class="org.apache.cloudstack.hypervisor.external.observation.NativeObservationBindingResolver" />
+
+    <bean id="ExternalRefreshWorker" class="org.apache.cloudstack.hypervisor.external.reconciliation.ExternalRefreshWorker">
+        <property name="name" value="ExternalRefreshWorker" />
+    </bean>
+
+    <bean id="ExternalObservationService" class="org.apache.cloudstack.hypervisor.external.observation.ExternalObservationService">
+        <property name="name" value="ExternalObservationService" />
+    </bean>
 </beans>

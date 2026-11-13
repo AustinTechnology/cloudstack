@@ -52,6 +52,7 @@ import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
+import org.apache.cloudstack.hypervisor.external.adoption.AdoptionRegistry;
 import org.apache.logging.log4j.Logger;
 import org.junit.After;
 import org.junit.Assume;
@@ -111,6 +112,30 @@ import com.cloud.vm.dao.VMInstanceDao;
 
 @RunWith(MockitoJUnitRunner.class)
 public class ExternalPathPayloadProvisionerTest {
+
+    @Test
+    public void nativeStatusMapIsRegistryAuthoredAndExplicitlyOptedIn() {
+        Map<String, Map<String, String>> details = new HashMap<>();
+        details.put("host", new HashMap<>(Map.of("proxmox_cluster", "lab", "native_adoption_status", "true")));
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("native_adoption_status_bindings", "untrusted");
+        doReturn(Map.of("101", new AdoptionRegistry.StatusBinding("i-1-VM", "guest", "hash", "managed")))
+                .when(provisioner).nativeStatusBindings("lab");
+        provisioner.addNativeStatusBindings(details, payload);
+        assertEquals(Map.of("101", Map.of("cloudstack_instance_name", "i-1-VM", "expected_proxmox_name", "guest")),
+                payload.get("native_adoption_status_bindings"));
+    }
+
+    @Test
+    public void nativeStatusDefaultsToLegacyAndRejectsMalformedSetting() {
+        assertFalse(provisioner.nativeAdoptionStatus(new HashMap<>()));
+        try {
+            provisioner.nativeAdoptionStatus(Map.of("host", Map.of("native_adoption_status", "TRUE")));
+            org.junit.Assert.fail("noncanonical opt-in must fail closed");
+        } catch (IllegalArgumentException expected) {
+            // Invalid configuration must not silently choose legacy behavior.
+        }
+    }
 
     @Spy
     @InjectMocks

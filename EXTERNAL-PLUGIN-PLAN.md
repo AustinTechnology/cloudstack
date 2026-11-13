@@ -255,10 +255,25 @@ Verification:
 
 ### Step 7: let CloudStack pull a VM's real configuration
 
-- Add a plugin action that asks the script for a VM's current CPU, RAM, NICs and IPs and updates CloudStack through its own services.
-- This replaces the sync tool's direct database writes behind the "RefreshDetails" action and the periodic reconcile.
+**Revised scope approved:** replace the entire standalone sync service with CloudStack management-server components plus the Proxmox extension, not two permanent reconcilers.
 
-Validation: change CPU/RAM and an IP in Proxmox, run the action, confirm CloudStack matches and the sync tool made no write.
+Implementation sequence (in progress; not a completed cutover):
+1. Read-only provider `getconfig` and cluster `discover` actions; strict source identity, stable current config, no pending changes, typed agent availability. Native authorized dry-run/apply refresh must update CloudStack through its own transactional services. Disk topology is reported, not converted to volume objects.
+2. Native inventory/matching and periodic reconciliation share the same refresh implementation. Associate by exact cluster+VMID and global host/MAC/owner/network eligibility, never names or VLAN alone. Account for observed customized-offering CPU/RAM changes; report fixed-offering mismatch rather than silently changing billing intent. Importing OOB NIC metadata must not call provider `plugnic`.
+3. CloudStack-owned adoption registry, shared-DB claims/lease/execution/authority state and callback dispatch replace the sync-hosted registry. Preserve existing UUIDs, generations, canonical manifests/hashes, released tombstones, operation/worker leases and unknown submissions. Extend retirement fencing to newer adopted scale/HA/NIC mutations, which currently have only a managed-state check. Never automatically replay uncertain executions.
+4. Retain passive ARP fallback through native authenticated observation ingestion and the node-local collector, with cluster+VMID+MAC identity, separate capture confirmations, expiry and agent precedence. No silent loss of no-agent IP coverage. Old global-MAC observations need unambiguous identity before migration; otherwise recollect instead of assuming ownership.
+5. Fenced migration/cutover: inventory all old writer entry points and state, stop new admissions, retain ambiguous-operation fences, transfer authority exactly once, switch all callbacks, recollect fresh inventory and validate parity. Keep production service running until replacement and separately authorized rollout are ready; never run old and new independent writers on the same fields.
+
+Validation: real lab reads, native dry-run/apply with observed CPU/RAM/IP changes and no sync writes; unchanged provider/guest lifecycle during refresh; native NIC topology reconciliation; adopted lifecycle/status and unknown-operation/retirement semantics; observer fallback; scheduler single-writer behavior; full claim-state migration read-back before declaring the service removable. Existing live/stopped/HA host-following tests from step 2 remain valid; no blanket host-placement rewrite is warranted.
+
+**Lab checkpoint — first native refresh slice working:**
+- `listExternalInstances` and owner-authorized `refreshExternalVirtualMachine` are deployed in the lab. Extension capabilities `instancediscoversupported` and `instancegetconfigsupported` default to unsupported. Refresh defaults to dry-run.
+- Customized-offering CPU/RAM refresh performs native detail, resource-count and usage-event updates under a VM transaction. Fixed-offering differences remain report-only. Ordinary VM binding checks include exact cluster/VMID, native instance name, selected node and power, with fresh configuration reads and native ownership/placement revalidation. This is bounded metadata reconciliation, not proof of an immutable provider incarnation or authorization for lifecycle operations.
+- A dedicated stopped fixture, `lab-native-refresh01` (CS UUID `a84b231f-a2f4-4fa4-9549-9b7b19c76834`, Proxmox `acs-lab:102`), demonstrated provider-side 1 CPU/512 MiB → 2 CPU/768 MiB: dry-run left CloudStack unchanged; apply updated VM metadata, account CPU/memory counts and one usage event; repeat apply changed nothing. Restoring 1 CPU/512 MiB through the same path restored account counts. The fixture remained stopped throughout refresh, and the existing test guests stayed running.
+- 632 Java tests and 19 full-entrypoint shell tests pass. Registry core additionally passed actual CloudStack JDBC/MariaDB lifecycle, competing-lease, expiry, generation, import and handover fixture checks in an isolated schema (26 assertions); those checks use synthetic VM verifiers, not live adoption integration.
+- Native registry API/dispatch/real-VM verification and periodic reconciliation remain unwired. Adopted resource apply remains blocked until native registry integration. NIC/IP writes and topology import remain report-only pending authoritative network mapping. Observer integration remains in progress. The legacy production sync/registry remains running; no cutover or full replacement is claimed.
+
+Source dependency inventory: the operator notes. It is source-only, not a live registry snapshot. Stopped-source adoption remains unsupported unless deliberately implemented; parity does not require starting a stopped guest merely to import it.
 
 ### Step 8: disks (needs a design decision first)
 

@@ -52,6 +52,7 @@ import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
+import org.apache.cloudstack.hypervisor.external.adoption.AdoptionRegistry;
 import org.apache.cloudstack.utils.security.DigestHelper;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
@@ -150,6 +151,134 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     private static final List<String> TRIVIAL_ACTIONS = Arrays.asList(
             "status", "statuses", "getipaddress"
     );
+
+    // This is deliberately a status-only switch, not a lifecycle cutover.
+    // Lifecycle callbacks continue to use their existing authorization path.
+    private static final String NATIVE_ADOPTION_STATUS = "native_adoption_status";
+    private static final String NATIVE_ADOPTION_LIFECYCLE = "native_adoption_lifecycle";
+    private static final String NATIVE_CONTEXT = "native_adoption_context";
+
+    protected AdoptionRegistry adoptionRegistry() { return new AdoptionRegistry(); }
+
+    private static String field(JsonObject obj, String key) {
+        return obj != null && obj.has(key) && !obj.get(key).isJsonNull() ? obj.get(key).getAsString() : "";
+    }
+
+    private static JsonObject object(JsonObject obj, String key) {
+        return obj != null && obj.has(key) && obj.get(key).isJsonObject() ? obj.getAsJsonObject(key) : new JsonObject();
+    }
+
+    private static String nativeOperation(String action) {
+        switch (action) {
+            case "getconsole": return "console";
+            case "CreateSnapshot": return "create_snapshot";
+            case "RestoreSnapshot": return "restore_snapshot";
+            case "DeleteSnapshot": return "delete_snapshot";
+            case "start": case "stop": case "reboot": case "setha": case "scale": case "plugnic": case "unplugnic": return action;
+            case "status": case "getconfig": case "getipaddress": return "";
+            default: throw new IllegalArgumentException("Native adoption does not support action: " + action);
+        }
+    }
+
+    private static final class NativeOperation {
+        final AdoptionRegistry registry;
+        final AdoptionRegistry.Identity identity;
+        final AdoptionRegistry.Lease lease;
+        NativeOperation(AdoptionRegistry registry, AdoptionRegistry.Identity identity, AdoptionRegistry.Lease lease) {
+            this.registry = registry; this.identity = identity; this.lease = lease;
+        }
+    }
+
+    /** Derive authorization only from the manager's callback identity and VM details. */
+    protected NativeOperation prepareNativeOperation(String action, Map<String, Object> payload, int wait) {
+        JsonObject root = GsonHelper.getGson().toJsonTree(payload).getAsJsonObject();
+        JsonObject details = object(root, "externaldetails");
+        JsonObject host = object(details, "host");
+        String enabled = field(host, NATIVE_ADOPTION_LIFECYCLE);
+        if (enabled.isEmpty() || "false".equals(enabled)) { return null; }
+        if (!"true".equals(enabled)) { throw new IllegalArgumentException("Invalid native adoption lifecycle setting"); }
+        JsonObject vm = object(details, "virtualmachine");
+        boolean adopted = "true".equals(field(vm, "adopt_existing"));
+        for (String key : Arrays.asList("adopt_claim_id", "adopt_claim_generation", "adopt_manifest_sha256",
+                "adopt_manifest_json", "adopt_execution_plan_sha256", "adopt_ip_overrides_json")) {
+            adopted |= !field(vm, key).isEmpty();
+        }
+        if (!adopted) { return null; }
+        String operation = nativeOperation(action);
+        if (wait <= 0 || wait > 6900) { throw new IllegalArgumentException("Native adoption wait must be 1..6900 seconds"); }
+        String cluster = field(host, "proxmox_cluster");
+        String vmCluster = field(vm, "proxmox_cluster");
+        if (cluster.isEmpty() || (!vmCluster.isEmpty() && !cluster.equals(vmCluster))) {
+            throw new IllegalArgumentException("Adoption cluster differs from actuator host cluster");
+        }
+        JsonObject toDetails = object(object(root, "cloudstack.vm.details"), "details");
+        String vmid = "";
+        for (JsonObject aliases : Arrays.asList(toDetails, vm)) {
+            for (String key : Arrays.asList("proxmox_vmid", "External:proxmox_vmid")) {
+                if (!aliases.has(key)) { continue; }
+                String candidate = field(aliases, key);
+                if (!candidate.matches("[1-9][0-9]*") || (!vmid.isEmpty() && !vmid.equals(candidate))) {
+                    throw new IllegalArgumentException("Invalid or conflicting callback Proxmox VMID");
+                }
+                vmid = candidate;
+            }
+        }
+        if (vmid.isEmpty()) { throw new IllegalArgumentException("Missing callback Proxmox VMID"); }
+        String generation = field(vm, "adopt_claim_generation");
+        if (!generation.matches("[1-9][0-9]*")) { throw new IllegalArgumentException("Invalid adoption generation"); }
+        String manifest = field(vm, "adopt_manifest_json");
+        JsonObject manifestObject = JsonParser.parseString(manifest).getAsJsonObject();
+        String node = field(object(manifestObject, "placement"), "node");
+        AdoptionRegistry.Identity identity = new AdoptionRegistry.Identity(field(vm, "adopt_claim_id"),
+                Integer.parseInt(generation), cluster, Integer.parseInt(vmid), field(vm, "adopt_manifest_sha256"),
+                field(root, "virtualmachineid"), field(root, "virtualmachinename"));
+        // Reservation validates manifest bytes/hash, cluster, node, and actuator VMID.
+        new AdoptionRegistry.Reservation(identity.claimId, identity.generation, identity.cluster, node,
+                identity.vmid, identity.manifestHash, manifest);
+        AdoptionRegistry registry = adoptionRegistry();
+        AdoptionRegistry.Lease lease = null;
+        if (operation.isEmpty()) {
+            if (!"managed".equals(registry.validatedState(identity))) { throw new IllegalStateException("Adoption is not managed"); }
+        } else {
+            lease = registry.acquire(identity, operation);
+        }
+        Map<String, Object> context = new HashMap<>();
+        context.put("action", action); context.put("operation", operation);
+        context.put("authorization_from_state", "managed");
+        context.put("stored_state", lease == null ? "managed" : "operating");
+        context.put("claim_id", identity.claimId); context.put("generation", identity.generation);
+        context.put("cluster", identity.cluster); context.put("vmid", identity.vmid);
+        context.put("manifest_sha256", identity.manifestHash); context.put("cloudstack_vm_ref", identity.vmUuid);
+        context.put("cloudstack_instance_name", identity.instanceName);
+        if (lease != null) {
+            context.put("lease_id", lease.id); context.put("expires_epoch", lease.expiresAt.toInstant().getEpochSecond());
+        }
+        payload.put(NATIVE_CONTEXT, context);
+        return new NativeOperation(registry, identity, lease);
+    }
+
+    protected Map<String, AdoptionRegistry.StatusBinding> nativeStatusBindings(String cluster) {
+        return new AdoptionRegistry().statusBindings(cluster);
+    }
+
+    protected boolean nativeAdoptionStatus(Map<String, Map<String, String>> details) {
+        Map<String, String> host = details == null ? null : details.get("host");
+        String value = host == null ? null : host.get(NATIVE_ADOPTION_STATUS);
+        if (value == null || "false".equals(value)) { return false; }
+        if ("true".equals(value)) { return true; }
+        throw new IllegalArgumentException("Invalid native adoption status setting");
+    }
+
+    protected void addNativeStatusBindings(Map<String, Map<String, String>> details, Map<String, Object> payload) {
+        if (!nativeAdoptionStatus(details)) { return; }
+        String cluster = details.get("host").get("proxmox_cluster");
+        Map<String, Map<String, String>> bindings = new HashMap<>();
+        nativeStatusBindings(cluster).forEach((vmid, binding) -> bindings.put(vmid, Map.of(
+                "cloudstack_instance_name", binding.instanceName,
+                "expected_proxmox_name", binding.expectedProxmoxName)));
+        // This field is authored here, not copied from command parameters or VM details.
+        payload.put("native_adoption_status_bindings", bindings);
+    }
 
     @Override
     public String getName() {
@@ -492,6 +621,10 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         if (vmStates != null) {
             logger.debug("Found {} VMs on the host {}", vmStates.size(), host);
             return vmStates;
+        }
+        if (nativeAdoptionStatus(accessDetails)) {
+            // A failed native batch must not fall back to unrelated per-VM paths.
+            throw new CloudRuntimeException("Native adoption status batch failed");
         }
         vmStates = new HashMap<>();
         List<UserVmVO> allVms = _uservmDao.listByHostId(hostId);
@@ -917,6 +1050,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     protected Map<String, HostVmStateReportEntry> getVmPowerStates(Host host,
                    Map<String, Map<String, String>> accessDetails, String extensionName, String extensionPath) {
         Map<String, Object> modifiedDetails = loadAccessDetails(accessDetails, null);
+        addNativeStatusBindings(accessDetails, modifiedDetails);
         logger.debug("Trying to get VM power statuses from the external system for {}", host);
         Pair<Boolean, String> result = getInstanceStatusesOnExternalSystem(extensionName, extensionPath,
                 host.getName(), modifiedDetails, AgentManager.Wait.value());
@@ -1010,6 +1144,8 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
 
     public Pair<Boolean, String> executeExternalCommand(String extensionName, String action,
                         Map<String, Object> accessDetails, int wait, String errorLogPrefix, String file) {
+        NativeOperation nativeOperation = null;
+        Process nativeProcess = null;
         try {
             Path executablePath = Paths.get(file).toAbsolutePath().normalize();
             if (!Files.isExecutable(executablePath)) {
@@ -1019,10 +1155,14 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             if (wait == 0) {
                 wait = AgentManager.Wait.value();
             }
+            // Never accept a context supplied by command parameters or another caller.
+            Map<String, Object> payload = new HashMap<>(accessDetails);
+            payload.remove(NATIVE_CONTEXT);
+            nativeOperation = prepareNativeOperation(action, payload, wait);
             List<String> command = new ArrayList<>();
             command.add(executablePath.toString());
             command.add(action);
-            String dataFile = prepareExternalPayload(extensionName, accessDetails);
+            String dataFile = prepareExternalPayload(extensionName, payload);
             command.add(dataFile);
             command.add(Integer.toString(wait));
             ProcessBuilder builder = new ProcessBuilder(command);
@@ -1031,12 +1171,22 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             logger.debug("Executing {} for command: {} with wait: {} and data file: {}", executablePath,
                     action, wait, dataFile);
 
+            if (nativeOperation != null && nativeOperation.lease != null) {
+                nativeOperation.registry.assertLease(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
+                nativeOperation.registry.assertLeaseForDuration(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id, wait + 30);
+            }
             Process process = builder.start();
+            if (nativeOperation != null && nativeOperation.lease != null) { nativeProcess = process; }
             boolean finished = process.waitFor(wait, TimeUnit.SECONDS);
             if (!finished) {
+                if (nativeOperation != null && nativeOperation.lease != null) {
+                    // Stop already spawned transports as well as their shell; an
+                    // unknown outcome still retains the durable operating fence.
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                }
                 process.destroyForcibly();
                 logger.error("{}: External API execution timed out after {} seconds", errorLogPrefix, wait);
-                return new Pair<>(false, "Timeout");
+                return nativeProcess == null ? new Pair<>(false, "Timeout") : nativeUncertainOutcome(action);
             }
             StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -1048,15 +1198,43 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             int exitCode = process.exitValue();
             if (exitCode != 0) {
                 logger.warn("{}: External API execution failed with exit code {}", errorLogPrefix, exitCode);
-                return new Pair<>(false, "Exit code: " + exitCode + ", Output: " + output.toString().trim());
+                return nativeProcess == null ? new Pair<>(false, "Exit code: " + exitCode + ", Output: " + output.toString().trim()) : nativeUncertainOutcome(action);
+            }
+            if (nativeOperation != null && nativeOperation.lease != null) {
+                try {
+                    JsonObject result = JsonParser.parseString(output.toString()).getAsJsonObject();
+                    if (!"success".equals(field(result, "status"))) {
+                        return nativeUncertainOutcome(action);
+                    }
+                } catch (RuntimeException invalid) {
+                    return nativeUncertainOutcome(action);
+                }
+                nativeOperation.registry.assertLease(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
+                nativeOperation.registry.complete(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
             }
             deleteExtensionPayloadFile(extensionName, action, dataFile);
             return new Pair<>(true, output.toString().trim());
 
         } catch (IOException | InterruptedException e) {
+            if (nativeProcess != null) {
+                nativeProcess.descendants().forEach(ProcessHandle::destroyForcibly);
+                nativeProcess.destroyForcibly();
+                if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                return nativeUncertainOutcome(action);
+            }
             logger.error("{}: External operation failed", errorLogPrefix, e);
             throw new CloudRuntimeException(String.format("%s: External operation failed", errorLogPrefix), e);
+        } catch (RuntimeException e) {
+            // Completion/read-back failures after a provider write must not enter
+            // ordinary NIC allocation cleanup or trigger a compensating write.
+            if (nativeProcess != null) { return nativeUncertainOutcome(action); }
+            throw e;
         }
+    }
+
+    private Pair<Boolean, String> nativeUncertainOutcome(String action) {
+        String prefix = ("plugnic".equals(action) || "unplugnic".equals(action)) ? "NIC_OUTCOME_UNKNOWN: " : "";
+        return new Pair<>(false, prefix + "Native adoption outcome is unknown; inspect guest and claim before recovery");
     }
 
     protected void deleteExtensionPayloadFile(String extensionName, String action, String payloadFileName) {

@@ -41,6 +41,11 @@ public interface ExtensionHelper {
      */
     boolean isInstanceScaleSupported(long extensionId);
 
+    /** Explicit opt-in for the read-only getconfig instance action. */
+    String INSTANCE_GET_CONFIG_SUPPORTED = "instancegetconfigsupported";
+
+    boolean isInstanceGetConfigSupported(long extensionId);
+
     String INSTANCE_NIC_CHANGE_SUPPORTED = "instancenicchangesupported";
 
     /** Whether this enabled orchestrator supports plugnic and unplugnic instance operations. */

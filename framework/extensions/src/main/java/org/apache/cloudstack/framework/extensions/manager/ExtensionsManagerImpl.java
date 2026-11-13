@@ -2288,6 +2288,11 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         return runInstanceAction(vm, SCALE_ACTION, parameters);
     }
 
+    @Override
+    public Answer getInstanceConfig(VirtualMachine vm) {
+        return runInstanceAction(vm, GET_CONFIG_ACTION, Collections.emptyMap());
+    }
+
     protected Answer runInstanceAction(VirtualMachine vm, String action, Map<String, Object> parameters) {
         Pair<Long, Long> clusterAndHostId = virtualMachineManager.findClusterAndHostIdForVm(vm, false);
         Host host = clusterAndHostId.second() == null ? null : hostDao.findById(clusterAndHostId.second());
@@ -2299,6 +2304,16 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             Extension extension = getExtensionForCluster(host.getClusterId());
             if (extension == null || !isInstanceScaleSupported(extension.getId())) {
                 return new Answer(null, false, "The instance's extension does not support scaling.");
+            }
+        }
+        if (GET_CONFIG_ACTION.equals(action)) {
+            if (clusterAndHostId.first() == null || host.getClusterId() == null
+                    || !clusterAndHostId.first().equals(host.getClusterId())) {
+                return new Answer(null, false, "The instance host and selected cluster do not match.");
+            }
+            Extension extension = getExtensionForCluster(host.getClusterId());
+            if (extension == null || !isInstanceGetConfigSupported(extension.getId())) {
+                return new Answer(null, false, "The instance's extension does not support configuration snapshots.");
             }
         }
         VirtualMachineTO virtualMachineTO = virtualMachineManager.toVmTO(new VirtualMachineProfileImpl(vm));
@@ -2348,6 +2363,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         }
         ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(extensionId, INSTANCE_SCALE_SUPPORTED);
         return detailsVO != null && Boolean.parseBoolean(StringUtils.trim(detailsVO.getValue()));
+    }
+
+    @Override
+    public boolean isInstanceGetConfigSupported(long extensionId) {
+        Extension extension = getExtension(extensionId);
+        if (extension == null || extension.getType() != Extension.Type.Orchestrator
+                || extension.getState() != Extension.State.Enabled) {
+            return false;
+        }
+        ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_GET_CONFIG_SUPPORTED);
+        return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
     }
 
     @Override

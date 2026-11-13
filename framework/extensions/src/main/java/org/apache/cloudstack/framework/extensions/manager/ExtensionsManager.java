@@ -116,4 +116,9 @@ public interface ExtensionsManager extends Manager {
     Answer scaleInstance(VirtualMachine vm, int cpuNumber, int memoryMib);
 
     String SCALE_ACTION = "scale";
+
+    /** Read-only configuration snapshot from the currently assigned extension. */
+    Answer getInstanceConfig(VirtualMachine vm);
+
+    String GET_CONFIG_ACTION = "getconfig";
 }

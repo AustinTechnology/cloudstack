@@ -2481,6 +2481,53 @@ public class ExtensionsManagerImplTest {
     }
 
     @Test
+    public void getConfigRequiresAnExplicitCapabilityBeforeDispatch() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
+        HostVO host = mock(HostVO.class);
+        when(host.getClusterId()).thenReturn(1L);
+        when(hostDao.findById(5L)).thenReturn(host);
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(4L);
+        doReturn(extension).when(extensionsManager).getExtensionForCluster(1L);
+        doReturn(false).when(extensionsManager).isInstanceGetConfigSupported(4L);
+        assertFalse(extensionsManager.getInstanceConfig(vm).getResult());
+        verify(agentMgr, never()).easySend(anyLong(), any());
+    }
+
+    @Test
+    public void getConfigRefusesAHostFromAnotherCluster() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
+        HostVO host = mock(HostVO.class);
+        when(host.getClusterId()).thenReturn(2L);
+        when(hostDao.findById(5L)).thenReturn(host);
+        assertFalse(extensionsManager.getInstanceConfig(vm).getResult());
+        verify(agentMgr, never()).easySend(anyLong(), any());
+    }
+
+    @Test
+    public void getConfigDispatchesReadOnlyActionToTheInstanceHost() {
+        VirtualMachine vm = mock(VirtualMachine.class);
+        when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(1L, 5L));
+        HostVO host = mock(HostVO.class);
+        when(host.getId()).thenReturn(5L);
+        when(host.getClusterId()).thenReturn(1L);
+        when(hostDao.findById(5L)).thenReturn(host);
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(4L);
+        doReturn(extension).when(extensionsManager).getExtensionForCluster(1L);
+        doReturn(true).when(extensionsManager).isInstanceGetConfigSupported(4L);
+        when(virtualMachineManager.toVmTO(any())).thenReturn(mock(VirtualMachineTO.class));
+        Answer answer = mock(Answer.class);
+        ArgumentCaptor<RunCustomActionCommand> command = ArgumentCaptor.forClass(RunCustomActionCommand.class);
+        when(agentMgr.easySend(eq(5L), command.capture())).thenReturn(answer);
+        assertEquals(answer, extensionsManager.getInstanceConfig(vm));
+        assertEquals("getconfig", command.getValue().getActionName());
+        assertTrue(command.getValue().getParameters().isEmpty());
+    }
+
+    @Test
     public void setInstanceHaFailsWhenTheInstanceHasNoHost() {
         VirtualMachine vm = mock(VirtualMachine.class);
         when(virtualMachineManager.findClusterAndHostIdForVm(vm, false)).thenReturn(new Pair<>(null, null));
@@ -2685,6 +2732,21 @@ public class ExtensionsManagerImplTest {
         assertFalse(extensionsManager.isInstanceScaleSupported(3L));
         when(extension.getState()).thenReturn(Extension.State.Disabled);
         assertFalse(extensionsManager.isInstanceScaleSupported(1L));
+    }
+
+    @Test
+    public void getConfigCapabilityRequiresEnabledOrchestratorAndExplicitTrue() {
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extension.getType()).thenReturn(Extension.Type.Orchestrator);
+        when(extension.getState()).thenReturn(Extension.State.Enabled);
+        when(extensionDao.findById(1L)).thenReturn(extension);
+        assertFalse(extensionsManager.isInstanceGetConfigSupported(1L));
+        ExtensionDetailsVO enabled = mock(ExtensionDetailsVO.class);
+        when(enabled.getValue()).thenReturn("true");
+        when(extensionDetailsDao.findDetail(1L, ExtensionHelper.INSTANCE_GET_CONFIG_SUPPORTED)).thenReturn(enabled);
+        assertTrue(extensionsManager.isInstanceGetConfigSupported(1L));
+        when(extension.getState()).thenReturn(Extension.State.Disabled);
+        assertFalse(extensionsManager.isInstanceGetConfigSupported(1L));
     }
 
     @Test

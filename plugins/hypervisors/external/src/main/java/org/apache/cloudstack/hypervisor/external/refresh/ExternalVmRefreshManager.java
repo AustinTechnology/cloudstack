@@ -1,0 +1,290 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations
+// under the License.
+package org.apache.cloudstack.hypervisor.external.refresh;
+
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import javax.inject.Inject;
+
+import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
+import org.apache.cloudstack.hypervisor.external.observation.ExternalObservationService;
+import org.apache.cloudstack.hypervisor.external.observation.ObservationBindingResolver;
+import org.apache.cloudstack.hypervisor.external.observation.ObservationValidation;
+import com.cloud.network.dao.NetworkDao;
+import com.cloud.agent.api.Answer;
+import com.cloud.event.EventTypes;
+import com.cloud.event.UsageEventUtils;
+import com.cloud.exception.InvalidParameterValueException;
+import com.cloud.host.HostVO;
+import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.Hypervisor.HypervisorType;
+import com.cloud.service.ServiceOfferingVO;
+import com.cloud.service.dao.ServiceOfferingDao;
+import com.cloud.storage.VMTemplateVO;
+import com.cloud.storage.dao.VMTemplateDao;
+import com.cloud.user.AccountService;
+import com.cloud.user.ResourceLimitService;
+import com.cloud.utils.Pair;
+import com.cloud.utils.component.ManagerBase;
+import com.cloud.utils.component.PluggableService;
+import com.cloud.utils.db.Transaction;
+import com.cloud.utils.db.TransactionLegacy;
+import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.vm.NicVO;
+import com.cloud.vm.VMInstanceDetailVO;
+import com.cloud.vm.VMInstanceVO;
+import com.cloud.vm.VirtualMachine;
+import com.cloud.vm.VirtualMachineManager;
+import com.cloud.vm.dao.NicDao;
+import com.cloud.vm.dao.VMInstanceDao;
+import com.cloud.vm.dao.VMInstanceDetailsDao;
+
+/** One-shot metadata refresh. No provider mutations, topology mutations, or state transitions. */
+public class ExternalVmRefreshManager extends ManagerBase implements PluggableService {
+    @Inject VMInstanceDao vmDao;
+    @Inject VMInstanceDetailsDao detailsDao;
+    @Inject ServiceOfferingDao offeringDao;
+    @Inject VMTemplateDao templateDao;
+    @Inject NicDao nicDao;
+    @Inject HostDao hostDao;
+    @Inject AccountService accountService;
+    @Inject ResourceLimitService resourceLimits;
+    @Inject VirtualMachineManager vmManager;
+    @Inject ExtensionsManager extensionsManager;
+    @Inject NetworkDao networkDao;
+    @Inject ObservationBindingResolver observationBindingResolver;
+    @Inject ExternalObservationService observationService;
+
+    @Override public List<Class<?>> getCommands() { return List.of(RefreshExternalVirtualMachineCmd.class); }
+
+    static final class Binding {
+        final long hostId;
+        final long clusterId;
+        final String cluster;
+        final String vmid;
+        final String node;
+        Binding(long hostId, long clusterId, String cluster, String vmid, String node) {
+            this.hostId = hostId; this.clusterId = clusterId; this.cluster = cluster; this.vmid = vmid; this.node = node;
+        }
+        boolean same(Binding b) {
+            return hostId == b.hostId && clusterId == b.clusterId && Objects.equals(cluster, b.cluster)
+                    && Objects.equals(vmid, b.vmid) && Objects.equals(node, b.node);
+        }
+    }
+
+    private static String exact(String value) {
+        if (value == null || value.isEmpty() || !value.equals(value.trim()) || value.chars().anyMatch(Character::isISOControl)) {
+            throw new InvalidParameterValueException("Missing or malformed external identity");
+        }
+        return value;
+    }
+
+    private String uniqueDetail(long vmId, String name) {
+        List<VMInstanceDetailVO> rows = detailsDao.findDetails(vmId, name);
+        if (rows == null || rows.isEmpty()) return null;
+        if (rows.size() != 1) throw new InvalidParameterValueException("Ambiguous external instance identity");
+        return exact(rows.get(0).getValue());
+    }
+
+    Binding binding(VMInstanceVO vm) {
+        if (vm == null || vm.getType() != VirtualMachine.Type.User || vm.getHypervisorType() != HypervisorType.External
+                || (vm.getState() != VirtualMachine.State.Running && vm.getState() != VirtualMachine.State.Stopped)) {
+            throw new InvalidParameterValueException("A running or stopped External user instance is required");
+        }
+        String plain = uniqueDetail(vm.getId(), "proxmox_vmid");
+        String prefixed = uniqueDetail(vm.getId(), "External:proxmox_vmid");
+        if (plain != null && prefixed != null && !plain.equals(prefixed)) {
+            throw new InvalidParameterValueException("Conflicting external instance identity aliases");
+        }
+        String vmid = exact(plain == null ? prefixed : plain);
+        if (!vmid.matches("[1-9][0-9]*")) throw new InvalidParameterValueException("Malformed external instance identity");
+        Pair<Long, Long> placement = vmManager.findClusterAndHostIdForVm(vm, false);
+        HostVO host = placement == null || placement.second() == null ? null : hostDao.findById(placement.second());
+        if (host == null || host.getHypervisorType() != HypervisorType.External || placement.first() == null
+                || !Objects.equals(host.getClusterId(), placement.first())) {
+            throw new InvalidParameterValueException("External instance placement is unavailable or inconsistent");
+        }
+        Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
+        Map<String, String> hostDetails = access == null ? Collections.emptyMap() : access.getOrDefault("host", Collections.emptyMap());
+        String cluster = exact(hostDetails.get("proxmox_cluster"));
+        String node = exact(hostDetails.get("node"));
+        String vmCluster = uniqueDetail(vm.getId(), "proxmox_cluster");
+        String vmClusterExternal = uniqueDetail(vm.getId(), "External:proxmox_cluster");
+        if ((vmCluster != null && !vmCluster.equals(cluster)) || (vmClusterExternal != null && !vmClusterExternal.equals(cluster))) {
+            throw new InvalidParameterValueException("Instance and host external cluster identities disagree");
+        }
+        return new Binding(host.getId(), host.getClusterId(), cluster, vmid, node);
+    }
+
+    ExternalVmConfiguration fetch(VMInstanceVO vm, Binding binding) {
+        Answer answer = extensionsManager.getInstanceConfig(vm);
+        if (answer == null || !answer.getResult()) throw new CloudRuntimeException("External configuration collection failed");
+        ExternalVmConfiguration snapshot = ExternalVmConfiguration.parse(answer.getDetails());
+        snapshot.requireIdentity(binding.cluster, binding.vmid);
+        if (!binding.node.equals(snapshot.node)) throw new InvalidParameterValueException("External instance node does not match its selected host");
+        if (!isAdopted(vm.getId()) && !Objects.equals(vm.getInstanceName(), snapshot.name)) {
+            throw new InvalidParameterValueException("External instance name does not match its native binding");
+        }
+        String expectedPower = vm.getState() == VirtualMachine.State.Running ? "running" : "stopped";
+        if (!expectedPower.equals(snapshot.power)) {
+            throw new InvalidParameterValueException("External power state is still reconciling");
+        }
+        return snapshot;
+    }
+
+    private boolean isAdopted(long vmId) {
+        for (String prefix : new String[]{"", "External:"}) {
+            for (String key : new String[]{"adopt_claim_id", "adopt_claim_generation", "adopt_manifest_sha256", "adopt_manifest_json"}) {
+                if (uniqueDetail(vmId, prefix + key) != null) return true;
+            }
+            String flag = uniqueDetail(vmId, prefix + "adopt_existing");
+            if (flag != null && !"false".equals(flag)) return true;
+        }
+        return false;
+    }
+
+    public ExternalVmRefreshResponse refresh(Long vmId, boolean dryRun) {
+        VMInstanceVO vm = vmId == null ? null : vmDao.findById(vmId);
+        if (vm == null) throw new InvalidParameterValueException("Instance not found");
+        accountService.checkAccess(CallContext.current().getCallingAccount(), null, true, vm);
+        Binding before = binding(vm);
+        ExternalVmConfiguration initial = fetch(vm, before);
+        ExternalNativeNicRefresh nicRefresh = new ExternalNativeNicRefresh(nicDao, networkDao, observationBindingResolver, observationService);
+        Map<String, ExternalNativeNicRefresh.Evidence> collected = nicRefresh.collect(vm.getId(), initial);
+        // Keep the same connection across SET TRANSACTION and Transaction.execute. Resolver reads
+        // must not reuse a repeatable-read snapshot predating the NIC/network locks.
+        TransactionLegacy isolation = TransactionLegacy.open("externalRefreshIsolation");
+        try {
+            boolean freshReads = isolation.getConnection().getAutoCommit();
+            if (freshReads) {
+                try (PreparedStatement ps = isolation.getConnection().prepareStatement("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")) { ps.execute(); }
+            }
+            Map<String, ExternalNativeNicRefresh.Evidence> evidence = freshReads ? collected : Collections.emptyMap();
+            return Transaction.execute((com.cloud.utils.db.TransactionCallback<ExternalVmRefreshResponse>) status -> {
+            VMInstanceVO locked = vmDao.lockRow(vmId, true);
+            if (locked == null) throw new InvalidParameterValueException("Instance no longer exists");
+            accountService.checkAccess(CallContext.current().getCallingAccount(), null, true, locked);
+            Binding current = binding(locked);
+            if (!before.same(current) || vm.getAccountId() != locked.getAccountId()
+                    || vm.getServiceOfferingId() != locked.getServiceOfferingId() || vm.getState() != locked.getState()) {
+                throw new InvalidParameterValueException("Instance identity or placement changed during refresh");
+            }
+            ExternalVmConfiguration fresh = fetch(locked, current);
+            if (!current.same(binding(locked))) {
+                throw new InvalidParameterValueException("External placement changed during collection");
+            }
+            if (!initial.configDigest.equals(fresh.configDigest) || initial.cpus != fresh.cpus || initial.memoryMb != fresh.memoryMb) {
+                throw new InvalidParameterValueException("External configuration changed during refresh");
+            }
+            HostVO host = hostDao.findById(current.hostId);
+            Map<String, Map<String, String>> access = host == null ? null : extensionsManager.getExternalAccessDetails(host, null);
+            String bridge = access == null || access.get("host") == null ? null : access.get("host").get("network_bridge");
+            return reconcile(locked, fresh, dryRun, nicRefresh, evidence, bridge);
+            });
+        } catch (SQLException e) {
+            throw new CloudRuntimeException("Cannot establish refresh transaction isolation", e);
+        } finally {
+            isolation.close();
+        }
+    }
+
+    ExternalVmRefreshResponse reconcile(VMInstanceVO vm, ExternalVmConfiguration snapshot, boolean dryRun) {
+        return reconcile(vm, snapshot, dryRun, null, Collections.emptyMap(), null);
+    }
+
+    ExternalVmRefreshResponse reconcile(VMInstanceVO vm, ExternalVmConfiguration snapshot, boolean dryRun,
+            ExternalNativeNicRefresh nicRefresh, Map<String, ExternalNativeNicRefresh.Evidence> evidence, String bridge) {
+        ServiceOfferingVO base = offeringDao.findByIdIncludingRemoved(vm.getServiceOfferingId());
+        // The DAO's map projection otherwise hides duplicate custom keys.
+        uniqueDetail(vm.getId(), "cpuNumber");
+        uniqueDetail(vm.getId(), "memory");
+        uniqueDetail(vm.getId(), "cpuSpeed");
+        ServiceOfferingVO current = offeringDao.findByIdIncludingRemoved(vm.getId(), vm.getServiceOfferingId());
+        if (base == null || current == null || current.getCpu() == null || current.getRamSize() == null || current.getSpeed() == null) {
+            throw new InvalidParameterValueException("Instance service offering is incomplete");
+        }
+        int oldCpu = current.getCpu(), oldMemory = current.getRamSize();
+        int targetCpu = base.getCpu() == null ? snapshot.cpus : oldCpu;
+        int targetMemory = base.getRamSize() == null ? snapshot.memoryMb : oldMemory;
+        List<String> unresolved = new ArrayList<>();
+        if (base.getCpu() != null && oldCpu != snapshot.cpus) unresolved.add("fixed offering CPU drift is report-only");
+        if (base.getRamSize() != null && oldMemory != snapshot.memoryMb) unresolved.add("fixed offering memory drift is report-only");
+        List<NicVO> nativeNics = nicDao.listByVmId(vm.getId());
+        for (ExternalVmConfiguration.Nic providerNic : snapshot.nics) {
+            if (nativeNics.stream().noneMatch(n -> providerNic.mac.equalsIgnoreCase(n.getMacAddress()))) {
+                unresolved.add("provider-only NIC " + providerNic.deviceId + " (" + providerNic.mac + ")");
+            }
+        }
+        if (!snapshot.agentAvailable) unresolved.add("guest agent unavailable; only qualified observation fallback may update addresses");
+        if (snapshot.disks.size() > 0) unresolved.add("disk topology is report-only");
+        boolean changed = oldCpu != targetCpu || oldMemory != targetMemory;
+        // Metadata refresh uses fresh source reads and a locked native VM binding.
+        // It does not authorize adoption, power changes, or claim transitions.
+        if (changed && isAdopted(vm.getId())) {
+            unresolved.add("adopted instance apply requires native registry integration; report-only");
+            if (!dryRun) throw new CloudRuntimeException("Native adoption registry integration is required before applying refresh");
+        }
+        if (changed && !dryRun) {
+            VMTemplateVO template = templateDao.findByIdIncludingRemoved(vm.getTemplateId());
+            if (template == null) throw new InvalidParameterValueException("Instance template is unavailable for resource accounting");
+            Map<String, String> parameters = new HashMap<>();
+            parameters.put("cpuNumber", Integer.toString(targetCpu));
+            parameters.put("cpuSpeed", current.getSpeed().toString());
+            parameters.put("memory", Integer.toString(targetMemory));
+            ServiceOfferingVO target = offeringDao.getComputeOffering(base, parameters);
+            if (base.getCpu() == null && oldCpu != targetCpu) saveDetail(vm.getId(), "cpuNumber", targetCpu);
+            if (base.getRamSize() == null && oldMemory != targetMemory) saveDetail(vm.getId(), "memory", targetMemory);
+            if (!countsRunningOnly() || vm.getState() == VirtualMachine.State.Running) {
+                resourceLimits.updateVmResourceCountForServiceOfferingChange(vm.getAccountId(), vm.isDisplay(), (long)oldCpu, (long)targetCpu,
+                        (long)oldMemory, (long)targetMemory, current, target, template);
+            }
+            publishUpgrade(vm, parameters);
+        }
+        List<ExternalVmRefreshResponse.IpChange> ipChanges = nicRefresh == null ? Collections.emptyList()
+                : nicRefresh.apply(vm, snapshot, evidence, bridge, dryRun, unresolved);
+        return new ExternalVmRefreshResponse(vm.getUuid(), dryRun, !dryRun && (changed || !ipChanges.isEmpty()), snapshot, oldCpu, oldMemory, unresolved, ipChanges);
+    }
+
+    protected boolean countsRunningOnly() {
+        return VirtualMachineManager.ResourceCountRunningVMsonly.value();
+    }
+
+    protected void publishUpgrade(VMInstanceVO vm, Map<String, String> parameters) {
+        UsageEventUtils.publishUsageEvent(EventTypes.EVENT_VM_UPGRADE, vm.getAccountId(), vm.getDataCenterId(), vm.getId(), vm.getHostName(),
+                vm.getServiceOfferingId(), vm.getTemplateId(), vm.getHypervisorType().toString(), VirtualMachine.class.getName(), vm.getUuid(), parameters, vm.isDisplay());
+    }
+
+    private void saveDetail(long vmId, String key, int value) {
+        List<VMInstanceDetailVO> rows = detailsDao.findDetails(vmId, key);
+        if (rows == null || rows.isEmpty()) {
+            detailsDao.persist(new VMInstanceDetailVO(vmId, key, Integer.toString(value), true));
+        } else if (rows.size() == 1) {
+            VMInstanceDetailVO detail = rows.get(0);
+            detail.setValue(Integer.toString(value));
+            if (!detailsDao.update(detail.getId(), detail)) throw new CloudRuntimeException("Failed to update instance offering detail");
+        } else {
+            throw new InvalidParameterValueException("Ambiguous instance offering details");
+        }
+    }
+}
