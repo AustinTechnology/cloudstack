@@ -38,9 +38,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * Offline handoff primitive, NOT an exposed endpoint. Any future endpoint MUST
- * enforce root-admin authentication and require an operator-controlled common
- * fence that has stopped every legacy writer/worker/callback before invocation.
+ * One-time handoff from the legacy registry, reached through ExternalAdoptionManager
+ * (root admin only). The operator must have stopped every legacy writer, worker and
+ * callback before import and keep them stopped; nothing here can fence that service.
  * Dry-run is advisory only, not a cutover lock. Never log the export payload.
  *
  * All claims are imported migration-fenced. The original entire export, including
@@ -67,6 +67,7 @@ public final class LegacyAdoptionImport {
      * The caller must separately ensure the legacy writer fence is held. */
     public Report importExport(String exportJson, boolean dryRun) {
         final JsonNode root = parse(exportJson);
+        requireSettled(root);
         return AdoptionRegistry.transaction(c -> {
             AdoptionRegistry.lockControl(c);
             requireEmpty(c);
@@ -85,6 +86,38 @@ public final class LegacyAdoptionImport {
             }
             return new Report(root, dryRun);
         });
+    }
+
+    /** Handover accepts only a settled registry and an import cannot be repeated, so an export
+     * with anything unfinished is refused here, in a dry run as well. Finish or remove those
+     * adoptions in the legacy registry, then export again. */
+    static void requireSettled(JsonNode root) {
+        java.util.List<String> open = new java.util.ArrayList<>();
+        java.util.Map<String, String> claimStates = new java.util.HashMap<>();
+        for (JsonNode claim : root.get(ARRAYS[0])) {
+            String state = claim.get("state").textValue();
+            claimStates.put(claim.get("id").textValue() + "/" + claim.get("generation").intValue(), state);
+            if (!("managed".equals(state) || "released".equals(state)) || optional(claim, "operation_lease_id") != null) {
+                open.add("claim " + claim.get("id").textValue() + " (VMID " + claim.get("proxmox_vmid").intValue() + ") is " + state);
+            }
+        }
+        if (root.get(ARRAYS[1]).size() != 0) { open.add(root.get(ARRAYS[1]).size() + " operation lease(s)"); }
+        for (JsonNode e : root.get(ARRAYS[2])) {
+            String state = e.get("state").textValue();
+            boolean settled = "managed".equals(claimStates.get(e.get("claim_id").textValue() + "/" + e.get("generation").intValue()))
+                    && "succeeded".equals(state) && e.get("worker_lease_id").isNull() && e.get("worker_lease_expires_at").isNull()
+                    && e.get("error_code").isNull() && !e.get("cloudstack_vm_ref").isNull() && !e.get("cloudstack_instance_name").isNull();
+            if (!settled) { open.add("execution " + e.get("id").textValue() + " is " + state); }
+        }
+        for (JsonNode a : root.get(ARRAYS[3])) {
+            if (a.get("id").intValue() != 1 || !a.get("mode").isNull() || !a.get("owner_id").isNull()
+                    || !a.get("target").isNull() || !a.get("expires_at").isNull()) { open.add("write authority is held"); }
+        }
+        if (!open.isEmpty()) {
+            int shown = Math.min(open.size(), 10);
+            throw new IllegalArgumentException("legacy registry is not settled: " + String.join("; ", open.subList(0, shown))
+                    + (open.size() > shown ? "; and " + (open.size() - shown) + " more" : ""));
+        }
     }
 
     private static void requireEmpty(Connection c) throws SQLException {

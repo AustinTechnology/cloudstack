@@ -179,7 +179,7 @@ public class NativeManagedAdoptionVerifierTest {
         rejected(this::run, "native lifecycle"); verify(v.extensionsManager, never()).getInstanceConfig(vm);
     }
     @Test public void failedSnapshotDoesNotLeakProviderError() {
-        when(answer.getResult()).thenReturn(false); rejected(this::run, "callback fenced");
+        when(answer.getResult()).thenReturn(false); rejected(this::run, "provider snapshot unavailable");
     }
     @Test public void currentResourcesMustMatchNotHistoricalResources() { when(offering.getCpu()).thenReturn(1); rejected(this::run, "CPU or memory"); }
     @Test public void wrongProviderNodeRejected() { when(answer.getDetails()).thenReturn(SNAP.replace("\"node\":\"new\"", "\"node\":\"other\"")); rejected(this::run, "current node"); }

@@ -206,11 +206,12 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
         if (nativeLifecycle != null && !nativeLifecycle.isEmpty() && !"false".equals(nativeLifecycle)) {
             throw fail("native lifecycle must be disabled before handover snapshot");
         }
-        // Never remove adoption metadata or bypass the legacy authorization callback.
+        // The legacy service is stopped by now. The claim state was checked above in this
+        // transaction, and the snapshot is a read that needs no registry.
         final Answer answer;
         try { answer = extensionsManager.getInstanceConfig(vm); }
-        catch (RuntimeException e) { throw fail("provider snapshot unavailable or legacy callback fenced"); }
-        if (answer == null || !answer.getResult()) throw fail("provider snapshot unavailable or legacy callback fenced");
+        catch (RuntimeException e) { throw fail("provider snapshot unavailable"); }
+        if (answer == null || !answer.getResult()) throw fail("provider snapshot unavailable");
         final ExternalVmConfiguration snapshot;
         try {
             snapshot = ExternalVmConfiguration.parse(answer.getDetails());
