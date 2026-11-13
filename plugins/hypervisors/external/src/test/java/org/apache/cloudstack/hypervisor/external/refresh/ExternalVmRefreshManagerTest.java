@@ -110,15 +110,20 @@ public class ExternalVmRefreshManagerTest {
         when(manager.detailsDao.findDetails(10L, "External:adopt_existing")).thenReturn(
                 java.util.List.of(new com.cloud.vm.VMInstanceDetailVO(10L, "External:adopt_existing", "true", false)));
         when(vm.getUuid()).thenReturn("vm-uuid");
-        doReturn(false).when(manager).claimManagedAndIdle("vm-uuid");
+        doReturn(null).when(manager).claimIdleStamp("vm-uuid");
         assertThrows(RuntimeException.class, () -> manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), false));
         verifyNoInteractions(manager.resourceLimits);
         verify(manager.detailsDao, never()).persist(any());
         verify(manager, never()).publishUpgrade(any(), anyMap());
         manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), true);
-        doReturn(true).when(manager).claimManagedAndIdle("vm-uuid");
+        verify(manager, never()).claimStillIdle(any(), any());
+        // An operation that starts during the refresh fails it, so its transaction rolls back.
+        doReturn("1/stamp").when(manager).claimIdleStamp("vm-uuid");
+        doReturn(false).when(manager).claimStillIdle("vm-uuid", "1/stamp");
+        assertThrows(RuntimeException.class, () -> manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), false));
+        doReturn(true).when(manager).claimStillIdle("vm-uuid", "1/stamp");
         manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), false);
-        verify(manager).publishUpgrade(eq(vm), anyMap());
+        verify(manager, org.mockito.Mockito.times(2)).publishUpgrade(eq(vm), anyMap());
     }
 
     private static final String NIC_SNAPSHOT = SNAPSHOT.replace("\"cpus\":4,\"memory_mb\":8192", "\"cpus\":2,\"memory_mb\":4096")

@@ -129,6 +129,28 @@ public class ExternalPathPayloadProvisionerTest {
     }
 
     @Test
+    public void inconsistentClaimIsReportedUnknownAndRetiredClaimIsReleasedOnceTheInstanceIsGone() {
+        Map<String, Map<String, String>> details = new HashMap<>();
+        details.put("host", new HashMap<>(Map.of("proxmox_cluster", "lab", "native_adoption_status", "true")));
+        Map<String, Object> payload = new HashMap<>();
+        AdoptionRegistry.Identity gone = new AdoptionRegistry.Identity("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 1, "lab", 103,
+                "0000000000000000000000000000000000000000000000000000000000000000", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "i-3-VM");
+        Map<String, AdoptionRegistry.StatusBinding> bindings = new java.util.LinkedHashMap<>();
+        bindings.put("101", new AdoptionRegistry.StatusBinding("i-1-VM", "guest", "hash", "managed"));
+        bindings.put("102", new AdoptionRegistry.StatusBinding("i-2-VM", null, null, AdoptionRegistry.StatusBinding.INCONSISTENT));
+        bindings.put("103", new AdoptionRegistry.StatusBinding("i-3-VM", "old", "hash", "retiring", gone));
+        doReturn(bindings).when(provisioner).nativeStatusBindings("lab");
+        doReturn(true).when(provisioner).releaseRetiredClaim(gone);
+        assertEquals(java.util.List.of("i-2-VM"), provisioner.addNativeStatusBindings(details, payload));
+        assertEquals(Map.of("101", Map.of("cloudstack_instance_name", "i-1-VM", "expected_proxmox_name", "guest")),
+                payload.get("native_adoption_status_bindings"));
+        // While the instance row still exists the retiring claim keeps its binding.
+        doReturn(false).when(provisioner).releaseRetiredClaim(gone);
+        provisioner.addNativeStatusBindings(details, payload);
+        assertEquals(2, ((Map<?, ?>) payload.get("native_adoption_status_bindings")).size());
+    }
+
+    @Test
     public void nativeStatusDefaultsToLegacyAndRejectsMalformedSetting() {
         assertFalse(provisioner.nativeAdoptionStatus(new HashMap<>()));
         try {

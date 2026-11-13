@@ -29,7 +29,8 @@ import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.VMInstanceDao;
 import com.cloud.vm.dao.VMInstanceDetailsDao;
 
-/** Resolves only ordinary deployed guests. Never grants lifecycle or adoption authority. */
+/** Resolves deployed guests, and adopted guests that have a managed claim. Never grants
+ * lifecycle or adoption authority. */
 public class NativeObservationBindingResolver implements ObservationBindingResolver {
     @Inject VMInstanceDao vmDao;
     @Inject VMInstanceDetailsDao detailsDao;
@@ -53,18 +54,32 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
         if (a != null && b != null && !a.equals(b)) throw new IllegalArgumentException();
         return a != null ? a : b;
     }
-    boolean adopted(long id, String uuid, String name, String cluster, int vmid) throws Exception {
+    /** Null for an instance that was never adopted. For an adopted instance, the provider name
+     * recorded by its one managed claim. An adopted instance without such a claim is an error. */
+    String adoptedProviderName(long id, String uuid, String name, String cluster, int vmid) throws Exception {
+        boolean marked = false;
         for (String p : new String[]{"", "External:"}) {
             for (String k : new String[]{"adopt_claim_id", "adopt_claim_generation", "adopt_manifest_sha256", "adopt_manifest_json"}) {
-                if (detail(id, p + k) != null) return true;
+                if (detail(id, p + k) != null) marked = true;
             }
             String flag = detail(id, p + "adopt_existing");
-            if (flag != null && !"false".equals(flag)) return true;
+            if (flag != null && !"false".equals(flag)) marked = true;
         }
         TransactionLegacy t = TransactionLegacy.open("observationAdoptionCheck");
-        try (PreparedStatement s = t.getConnection().prepareStatement("SELECT 1 FROM external_adoption_claims WHERE BINARY cloudstack_vm_ref=BINARY ? OR BINARY cloudstack_instance_name=BINARY ? OR (BINARY proxmox_cluster=BINARY ? AND proxmox_vmid=?) LIMIT 1")) {
+        try (PreparedStatement s = t.getConnection().prepareStatement("SELECT state,migration_fenced,manifest_json,cloudstack_vm_ref,cloudstack_instance_name,proxmox_cluster,proxmox_vmid FROM external_adoption_claims "
+                + "WHERE state<>'released' AND (BINARY cloudstack_vm_ref=BINARY ? OR BINARY cloudstack_instance_name=BINARY ? OR (BINARY proxmox_cluster=BINARY ? AND proxmox_vmid=?))")) {
             s.setString(1, uuid); s.setString(2, name); s.setString(3, cluster); s.setInt(4, vmid);
-            try (ResultSet r = s.executeQuery()) { return r.next(); }
+            try (ResultSet r = s.executeQuery()) {
+                if (!r.next()) {
+                    if (marked) throw new IllegalArgumentException();
+                    return null;
+                }
+                String state = r.getString(1), manifest = r.getString(3);
+                boolean usable = ("managed".equals(state) || "operating".equals(state)) && !r.getBoolean(2)
+                        && uuid.equals(r.getString(4)) && name.equals(r.getString(5)) && cluster.equals(r.getString(6)) && r.getInt(7) == vmid;
+                if (!usable || r.next()) throw new IllegalArgumentException();
+                return exact(com.google.gson.JsonParser.parseString(manifest).getAsJsonObject().get("name").getAsString());
+            }
         } finally { t.close(); }
     }
     private Pair<Long, Long> placement(VMInstanceVO vm) {
@@ -127,7 +142,9 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
             Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
             Map<String, String> hd = access == null ? Collections.emptyMap() : access.getOrDefault("host", Collections.emptyMap());
             String cluster = exact(hd.get("proxmox_cluster")), node = exact(hd.get("node")), bridge = exact(hd.get("network_bridge"));
-            if (adopted(id, uuid, instanceName, cluster, vmid)) return null;
+            String adoptedName = adoptedProviderName(id, uuid, instanceName, cluster, vmid);
+            // An adopted guest keeps its own provider name; a deployed guest is named after the instance.
+            String providerName = adoptedName != null ? adoptedName : instanceName;
             String vc = aliases(id, "proxmox_cluster");
             if (vc != null && !cluster.equals(vc)) return null;
             NicVO selected = null;
@@ -147,14 +164,14 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
             if (answer == null || !answer.getResult()) return null;
             ExternalVmConfiguration snap = ExternalVmConfiguration.parse(answer.getDetails());
             snap.requireIdentity(cluster, vmidText);
-            if (!node.equals(snap.node) || !instanceName.equals(snap.name)) return null;
+            if (!node.equals(snap.node) || !providerName.equals(snap.name)) return null;
             ExternalVmConfiguration.Nic providerNic = null;
             for (ExternalVmConfiguration.Nic n : snap.nics) if (mac.equals(n.mac)) { if (providerNic != null) return null; providerNic = n; }
-            if (providerNic == null || !ObservationProvenance.providerMatches(cluster, vmidText, node, instanceName, mac, bridge, vlan,
+            if (providerNic == null || !ObservationProvenance.providerMatches(cluster, vmidText, node, providerName, mac, bridge, vlan,
                     snap.cluster, snap.vmid, snap.node, snap.name, providerNic.mac, providerNic.bridge, providerNic.vlan)) return null;
             String fp = ObservationProvenance.fingerprint("external-observation-v1", Long.toString(id), uuid, Long.toString(vm.getUpdated()),
                     Long.toString(p.first()), Long.toString(p.second()), exact(host.getUuid()), cluster, vmidText, node,
-                    instanceName, nicUuid, Long.toString(selected.getNetworkId()), network, mac, providerNic.deviceId, bridge, Integer.toString(vlan));
+                    providerName, nicUuid, Long.toString(selected.getNetworkId()), network, mac, providerNic.deviceId, bridge, Integer.toString(vlan));
             return new Binding(id, p.first(), p.second(), vmid, mac, fp);
         } catch (Exception e) { return null; }
     }

@@ -43,7 +43,15 @@ public class ExternalAdoptionManagerTest {
                 () -> manager(true, new IllegalArgumentException("invalid export envelope")).handover());
     }
     @Test public void exposesAllCommands() {
-        assertEquals(3, new ExternalAdoptionManager().getCommands().size());
+        assertEquals(4, new ExternalAdoptionManager().getCommands().size());
+    }
+    @Test public void adoptionIsRootOnlyAndTheExportIsNotAnApiParameter() throws Exception {
+        assertThrows(PermissionDeniedException.class, () -> manager(false, null).adopt(null));
+        assertThrows(PermissionDeniedException.class, () -> manager(false, null).importExportFile(true));
+        for (java.lang.reflect.Field field : ImportExternalAdoptionRegistryCmd.class.getDeclaredFields()) {
+            org.apache.cloudstack.api.Parameter p = field.getAnnotation(org.apache.cloudstack.api.Parameter.class);
+            if (p != null) assertEquals("dryrun", p.name());
+        }
     }
     @Test public void leaseReleaseIsRootOnlyAndRejectsMalformedIdentityBeforeTheDatabase() {
         String id = "f8e69503-33a5-4093-a336-7c11116b4cc3";

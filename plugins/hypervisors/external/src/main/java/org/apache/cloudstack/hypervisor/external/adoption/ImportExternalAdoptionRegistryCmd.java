@@ -23,20 +23,18 @@ import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import com.cloud.user.Account;
 
-@APICommand(name = "importExternalAdoptionRegistry", description = "Import one legacy adoption registry export into the native registry, fenced until handover",
-        responseObject = ExternalAdoptionRegistryResponse.class, requestHasSensitiveInfo = true, responseHasSensitiveInfo = false,
+@APICommand(name = "importExternalAdoptionRegistry", description = "Import the legacy adoption registry export, read from "
+        + ExternalAdoptionManager.EXPORT_FILE + " on this management server, into the native registry, fenced until handover",
+        responseObject = ExternalAdoptionRegistryResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin}, httpMethod = "POST", since = "4.23.0")
 public class ImportExternalAdoptionRegistryCmd extends BaseCmd {
     @Inject ExternalAdoptionManager manager;
-    @Parameter(name = "export", type = CommandType.STRING, required = true, length = 4 * 1024 * 1024,
-            description = "Legacy export JSON with the four adoption arrays")
-    private String export;
     @Parameter(name = "dryrun", type = CommandType.BOOLEAN, description = "Validate without importing; defaults to true")
     private Boolean dryRun;
 
     @Override public long getEntityOwnerId() { return Account.ACCOUNT_ID_SYSTEM; }
     @Override public void execute() {
-        ExternalAdoptionRegistryResponse response = manager.importExport(export, dryRun == null || dryRun);
+        ExternalAdoptionRegistryResponse response = manager.importExportFile(dryRun == null || dryRun);
         response.setResponseName(getCommandName());
         setResponseObject(response);
     }

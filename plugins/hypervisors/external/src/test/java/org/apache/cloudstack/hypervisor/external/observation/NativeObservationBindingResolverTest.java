@@ -29,8 +29,11 @@ import com.cloud.vm.dao.VMInstanceDetailsDao;
 /** Resolver behavior with DB lookup seams stubbed; not a database integration test. */
 public class NativeObservationBindingResolverTest {
     static class Resolver extends NativeObservationBindingResolver {
-        boolean isAdopted; Long unique = 7L; String network = "network-uuid";
-        @Override boolean adopted(long i, String u, String n, String c, int v) { return isAdopted; }
+        boolean isAdopted; String adoptedName; Long unique = 7L; String network = "network-uuid";
+        @Override String adoptedProviderName(long i, String u, String n, String c, int v) {
+            if (isAdopted && adoptedName == null) throw new IllegalArgumentException("adopted without a managed claim");
+            return adoptedName;
+        }
         @Override Long uniqueVm(long cluster, int vmid) { return unique; }
         @Override String networkUuid(long id, String uri) { return network; }
     }
@@ -62,6 +65,12 @@ public class NativeObservationBindingResolverTest {
         when(answer.getDetails()).thenReturn(SNAPSHOT.replace("vmbr0","vmbr1")); assertNull(r.current(7,"02:00:00:00:00:01"));
         when(answer.getDetails()).thenReturn(SNAPSHOT.replace("i-2-7-VM","different")); assertNull(r.current(7,"02:00:00:00:00:01"));
         when(answer.getDetails()).thenReturn(SNAPSHOT); r.isAdopted=true; assertNull(r.current(7,"02:00:00:00:00:01"));
+        // An adopted guest with a managed claim resolves under the provider name of that claim.
+        r.adoptedName="oob-guest"; assertNull(r.current(7,"02:00:00:00:00:01"));
+        when(answer.getDetails()).thenReturn(SNAPSHOT.replace("i-2-7-VM","oob-guest"));
+        assertNotNull(r.current(7,"02:00:00:00:00:01"));
+        assertNotEquals(b.fingerprint,r.current(7,"02:00:00:00:00:01").fingerprint);
+        when(answer.getDetails()).thenReturn(SNAPSHOT); r.adoptedName=null;
         r.isAdopted=false; r.unique=null; assertNull(r.current(7,"02:00:00:00:00:01"));
         r.unique=7L; when(vm.getUpdated()).thenReturn(10L); assertNotEquals(b.fingerprint,r.current(7,"02:00:00:00:00:01").fingerprint);
     }

@@ -256,14 +256,22 @@ public final class AdoptionRegistry {
     }
 
     public static final class StatusBinding {
+        public static final String INCONSISTENT = "inconsistent";
         public final String instanceName, expectedProxmoxName, manifestHash, state;
+        /** Null for an inconsistent claim. */
+        public final Identity identity;
         public StatusBinding(String instanceName, String expectedProxmoxName, String manifestHash, String state) {
+            this(instanceName, expectedProxmoxName, manifestHash, state, null);
+        }
+        public StatusBinding(String instanceName, String expectedProxmoxName, String manifestHash, String state, Identity identity) {
             this.instanceName=instanceName; this.expectedProxmoxName=expectedProxmoxName;
-            this.manifestHash=manifestHash; this.state=state;
+            this.manifestHash=manifestHash; this.state=state; this.identity=identity;
         }
     }
 
-    /** Fail the entire batch for any unknown or inconsistent active claim. */
+    /** One binding per active claim. A claim that fails its own checks is returned as
+     * INCONSISTENT so that its instance is reported with an unknown power state and the
+     * rest of the cluster is still reported. A fenced or missing control row fails the batch. */
     public Map<String, StatusBinding> statusBindings(String cluster) {
         canonicalCluster(cluster);
         return transaction(c -> {
@@ -272,22 +280,23 @@ public final class AdoptionRegistry {
                 s.setString(1,cluster); try (ResultSet r=s.executeQuery()) {
                     while (r.next()) {
                         String state=r.getString(7);
-                        if (r.getBoolean(10)) { throw new Conflict("migration-fenced status claim"); }
-                        if ("reserved".equals(state) || "released".equals(state)) {
-                            if (r.getString(11)!=null || ("reserved".equals(state) && (r.getString(5)!=null || r.getString(6)!=null))) { throw new Conflict("inactive claim is inconsistent"); }
-                            try (PreparedStatement l=c.prepareStatement("SELECT 1 FROM external_adoption_operation_leases WHERE claim_id=? FOR UPDATE")) {
-                                l.setString(1,r.getString(1)); try (ResultSet lr=l.executeQuery()) { if (lr.next()) { throw new Conflict("inactive claim has a lease"); } }
+                        if ("reserved".equals(state) || "released".equals(state)) { continue; }
+                        try {
+                            if (r.getBoolean(10)) { throw new Conflict("migration-fenced status claim"); }
+                            if (!("bound".equals(state) || "managed".equals(state) || "operating".equals(state) || "retiring".equals(state))) { throw new Conflict("unknown claim state"); }
+                            Identity i=new Identity(r.getString(1),r.getInt(2),cluster,r.getInt(3),r.getString(4),r.getString(5),r.getString(6));
+                            lockedClaim(c,i);
+                            JsonNode doc=manifest(r.getString(9),i.manifestHash,cluster,r.getString(8),i.vmid);
+                            JsonNode name=doc.get("name");
+                            if (name==null || !name.isTextual()) { throw new Conflict("missing manifest Proxmox name"); }
+                            String expected=text(name.textValue());
+                            result.put(Integer.toString(i.vmid),new StatusBinding(i.instanceName,expected,i.manifestHash,state,i));
+                        } catch (Conflict | IllegalArgumentException inconsistent) {
+                            String instance=r.getString(6);
+                            if (instance!=null && !instance.isEmpty()) {
+                                result.put(Integer.toString(r.getInt(3)),new StatusBinding(instance,null,null,StatusBinding.INCONSISTENT,null));
                             }
-                            continue;
                         }
-                        if (!("bound".equals(state) || "managed".equals(state) || "operating".equals(state) || "retiring".equals(state))) { throw new Conflict("unknown claim state"); }
-                        Identity i=new Identity(r.getString(1),r.getInt(2),cluster,r.getInt(3),r.getString(4),r.getString(5),r.getString(6));
-                        lockedClaim(c,i);
-                        JsonNode doc=manifest(r.getString(9),i.manifestHash,cluster,r.getString(8),i.vmid);
-                        JsonNode name=doc.get("name");
-                        if (name==null || !name.isTextual()) { throw new Conflict("missing manifest Proxmox name"); }
-                        String expected=text(name.textValue());
-                        result.put(Integer.toString(i.vmid),new StatusBinding(i.instanceName,expected,i.manifestHash,state));
                     }
                 }
             }
@@ -351,17 +360,35 @@ public final class AdoptionRegistry {
     }
 
     /** For work that changes only CloudStack records, such as a metadata refresh. It takes no
-     * lease, and is refused while the claim is fenced, operating or anything but managed. */
-    public boolean managedAndIdle(String vmUuid) {
-        return transaction(c -> {
-            lockControl(c);
-            try (PreparedStatement s = c.prepareStatement("SELECT state,operation_lease_id,migration_fenced FROM external_adoption_claims WHERE BINARY cloudstack_vm_ref=BINARY ? FOR UPDATE")) {
-                s.setString(1, vmUuid);
-                try (ResultSet r = s.executeQuery()) {
-                    return r.next() && "managed".equals(r.getString(1)) && r.getString(2) == null && !r.getBoolean(3) && !r.next();
-                }
+     * lease. The work reads this stamp first, without any lock, and is refused when the result
+     * is null: the claim is fenced, operating or anything but managed. It must then call
+     * stillIdle() as its last step. The control row cannot be locked earlier, because the work
+     * reads the provider through the extension, and that read locks the same row. */
+    public String idleStamp(String vmUuid) {
+        return transaction(c -> idleStamp(c, vmUuid, false));
+    }
+
+    /** The last step of such work, in its own transaction, before it commits: true when no
+     * operation has started on the claim since the stamp was read. The locks taken here are
+     * held until that commit, so none can start before it either. */
+    public boolean stillIdle(String vmUuid, String stamp) {
+        return stamp != null && transaction(c -> stamp.equals(idleStamp(c, vmUuid, true)));
+    }
+
+    private static String idleStamp(Connection c, String vmUuid, boolean lock) throws SQLException {
+        String suffix = lock ? " FOR UPDATE" : "";
+        try (PreparedStatement s = c.prepareStatement("SELECT legacy_fenced FROM external_adoption_control WHERE id=1" + suffix); ResultSet r = s.executeQuery()) {
+            if (!r.next() || r.getBoolean(1)) { return null; }
+        }
+        try (PreparedStatement s = c.prepareStatement("SELECT state,operation_lease_id,migration_fenced,generation,updated_at FROM external_adoption_claims WHERE BINARY cloudstack_vm_ref=BINARY ?" + suffix)) {
+            s.setString(1, vmUuid);
+            try (ResultSet r = s.executeQuery()) {
+                if (!r.next() || !"managed".equals(r.getString(1)) || r.getString(2) != null || r.getBoolean(3)) { return null; }
+                // Every acquire and completion writes updated_at.
+                String stamp = r.getInt(4) + "/" + r.getString(5);
+                return r.next() ? null : stamp;
             }
-        });
+        }
     }
 
     /** State alone is not permission for a mutation: acquire a lease. */
@@ -431,6 +458,12 @@ public final class AdoptionRegistry {
             }
             return null;
         });
+    }
+
+    /** Only when nothing was sent to the provider, or the provider itself reported that the
+     * one request it ran had failed. The claim returns to managed exactly as after success. */
+    public void abandon(Identity i, String operation, String leaseId) {
+        complete(i, operation, leaseId);
     }
 
     /** Only after the entire actuator operation and required postcondition succeed. */

@@ -46,7 +46,8 @@ import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.VMInstanceDao;
 import com.cloud.vm.dao.VMInstanceDetailsDao;
 
-/** Read-only handover verifier for imported managed claims, not an adoption executor.
+/** Read-only verifier: of imported managed claims at handover, and of the records a native
+ * adoption has just written, before its claim becomes managed. It writes nothing.
  * Caller must hold the legacy writer fence AND quiesce native VM, NIC, detail,
  * account, domain, host, network and offering writers across management servers
  * for the entire handover. The VM row is locked, but the other DAO reads are
@@ -110,6 +111,8 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
             if (!seen.add(candidate.getId())) throw fail("duplicate native mapping candidate");
             if (candidate.getId() == target.getId()) sawTarget = true;
             String vmid = aliases(candidate.getId(), "proxmox_vmid");
+            // An instance that was never placed and has no VMID has no provider guest.
+            if (vmid == null && candidate.getHostId() == null && candidate.getLastHostId() == null) continue;
             if (vmid != null) {
                 try {
                     if (!vmid.matches("[1-9][0-9]*") || Integer.parseInt(vmid) <= 0) throw new IllegalArgumentException();
@@ -163,9 +166,21 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
     }
 
     @Override public void verify(AdoptionRegistry.Identity i, String storedNode, String manifestJson) {
+        check(i, storedNode, manifestJson, null);
+    }
+
+    /** For a native adoption. The registry has already locked the bound claim. The snapshot is
+     * taken by the adoption itself, because the instance has no managed claim to read through. */
+    public AdoptionRegistry.VmVerifier forAdoption(java.util.function.Function<VMInstanceVO, ExternalVmConfiguration> snapshot) {
+        if (snapshot == null) throw new IllegalArgumentException("snapshot source required");
+        return (i, storedNode, manifestJson) -> check(i, storedNode, manifestJson, snapshot);
+    }
+
+    private void check(AdoptionRegistry.Identity i, String storedNode, String manifestJson,
+            java.util.function.Function<VMInstanceVO, ExternalVmConfiguration> adoptionSnapshot) {
         if (i == null) throw fail("identity required");
         if (manifestJson == null || manifestJson.length() > 1024 * 1024) throw fail("manifest size unsupported");
-        requireManagedImport(i, storedNode, manifestJson);
+        if (adoptionSnapshot == null) requireManagedImport(i, storedNode, manifestJson);
         final JsonNode manifest;
         try { manifest = AdoptionRegistry.manifest(manifestJson, i.manifestHash, i.cluster, storedNode, i.vmid); }
         catch (RuntimeException e) { throw fail("manifest bytes, hash or original placement mismatch"); }
@@ -202,21 +217,29 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
         if (hd == null || !i.cluster.equals(hd.get("proxmox_cluster"))) throw fail("provider cluster mapping mismatch");
         String node = exact(hd.get("node"));
         String bridge = exact(hd.get("network_bridge"));
-        String nativeLifecycle = hd.get("native_adoption_lifecycle");
-        if (nativeLifecycle != null && !nativeLifecycle.isEmpty() && !"false".equals(nativeLifecycle)) {
-            throw fail("native lifecycle must be disabled before handover snapshot");
-        }
-        // The legacy service is stopped by now. The claim state was checked above in this
-        // transaction, and the snapshot is a read that needs no registry.
-        final Answer answer;
-        try { answer = extensionsManager.getInstanceConfig(vm); }
-        catch (RuntimeException e) { throw fail("provider snapshot unavailable"); }
-        if (answer == null || !answer.getResult()) throw fail("provider snapshot unavailable");
         final ExternalVmConfiguration snapshot;
-        try {
-            snapshot = ExternalVmConfiguration.parse(answer.getDetails());
-            snapshot.requireIdentity(i.cluster, Integer.toString(i.vmid));
-        } catch (RuntimeException e) { throw fail("invalid or mismatched provider snapshot"); }
+        if (adoptionSnapshot != null) {
+            try {
+                snapshot = adoptionSnapshot.apply(vm);
+                snapshot.requireIdentity(i.cluster, Integer.toString(i.vmid));
+            } catch (AdoptionRegistry.Conflict e) { throw e;
+            } catch (RuntimeException e) { throw fail("provider snapshot unavailable"); }
+        } else {
+            String nativeLifecycle = hd.get("native_adoption_lifecycle");
+            if (nativeLifecycle != null && !nativeLifecycle.isEmpty() && !"false".equals(nativeLifecycle)) {
+                throw fail("native lifecycle must be disabled before handover snapshot");
+            }
+            // The legacy service is stopped by now. The claim state was checked above in this
+            // transaction, and the snapshot is a read that needs no registry.
+            final Answer answer;
+            try { answer = extensionsManager.getInstanceConfig(vm); }
+            catch (RuntimeException e) { throw fail("provider snapshot unavailable"); }
+            if (answer == null || !answer.getResult()) throw fail("provider snapshot unavailable");
+            try {
+                snapshot = ExternalVmConfiguration.parse(answer.getDetails());
+                snapshot.requireIdentity(i.cluster, Integer.toString(i.vmid));
+            } catch (RuntimeException e) { throw fail("invalid or mismatched provider snapshot"); }
+        }
         JsonNode name = manifest.get("name");
         if (name == null || !name.isTextual() || !exact(name.textValue()).equals(snapshot.name) || !node.equals(snapshot.node)) {
             throw fail("provider name or current node mismatch");

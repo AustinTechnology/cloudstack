@@ -184,10 +184,18 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         final AdoptionRegistry registry;
         final AdoptionRegistry.Identity identity;
         final AdoptionRegistry.Lease lease;
+        final boolean retired;
         NativeOperation(AdoptionRegistry registry, AdoptionRegistry.Identity identity, AdoptionRegistry.Lease lease) {
-            this.registry = registry; this.identity = identity; this.lease = lease;
+            this(registry, identity, lease, false);
+        }
+        NativeOperation(AdoptionRegistry registry, AdoptionRegistry.Identity identity, AdoptionRegistry.Lease lease, boolean retired) {
+            this.registry = registry; this.identity = identity; this.lease = lease; this.retired = retired;
         }
     }
+
+    /** The extension exits with this status when a native adopted action failed and it knows
+     * that the provider did not change: nothing was sent, or the one task that ran reported failure. */
+    static final int NATIVE_KNOWN_FAILURE = 90;
 
     /** Derive authorization only from the manager's callback identity and VM details. */
     protected NativeOperation prepareNativeOperation(String action, Map<String, Object> payload, int wait) {
@@ -204,7 +212,10 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             adopted |= !field(vm, key).isEmpty();
         }
         if (!adopted) { return null; }
-        String operation = nativeOperation(action);
+        // Expunge of an adopted instance removes CloudStack records only. The claim is
+        // retired and the provider guest is kept, so nothing is sent to the provider.
+        boolean retire = "delete".equals(action);
+        String operation = retire ? "" : nativeOperation(action);
         if (wait <= 0 || wait > 6900) { throw new IllegalArgumentException("Native adoption wait must be 1..6900 seconds"); }
         String cluster = field(host, "proxmox_cluster");
         String vmCluster = field(vm, "proxmox_cluster");
@@ -237,6 +248,10 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                 identity.vmid, identity.manifestHash, manifest);
         AdoptionRegistry registry = adoptionRegistry();
         AdoptionRegistry.Lease lease = null;
+        if (retire) {
+            registry.retire(identity);
+            return new NativeOperation(registry, identity, null, true);
+        }
         if (operation.isEmpty()) {
             if (!"managed".equals(registry.validatedState(identity))) { throw new IllegalStateException("Adoption is not managed"); }
         } else {
@@ -269,15 +284,38 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         throw new IllegalArgumentException("Invalid native adoption status setting");
     }
 
-    protected void addNativeStatusBindings(Map<String, Map<String, String>> details, Map<String, Object> payload) {
-        if (!nativeAdoptionStatus(details)) { return; }
+    /** Returns the instance names whose claim is inconsistent; their power state is unknown. */
+    protected List<String> addNativeStatusBindings(Map<String, Map<String, String>> details, Map<String, Object> payload) {
+        List<String> unknown = new ArrayList<>();
+        if (!nativeAdoptionStatus(details)) { return unknown; }
         String cluster = details.get("host").get("proxmox_cluster");
         Map<String, Map<String, String>> bindings = new HashMap<>();
-        nativeStatusBindings(cluster).forEach((vmid, binding) -> bindings.put(vmid, Map.of(
-                "cloudstack_instance_name", binding.instanceName,
-                "expected_proxmox_name", binding.expectedProxmoxName)));
+        nativeStatusBindings(cluster).forEach((vmid, binding) -> {
+            if (AdoptionRegistry.StatusBinding.INCONSISTENT.equals(binding.state)) {
+                unknown.add(binding.instanceName);
+                return;
+            }
+            if ("retiring".equals(binding.state) && binding.identity != null && releaseRetiredClaim(binding.identity)) { return; }
+            bindings.put(vmid, Map.of(
+                    "cloudstack_instance_name", binding.instanceName,
+                    "expected_proxmox_name", binding.expectedProxmoxName));
+        });
         // This field is authored here, not copied from command parameters or VM details.
         payload.put("native_adoption_status_bindings", bindings);
+        return unknown;
+    }
+
+    /** A retiring claim is released once its instance row is gone from CloudStack. */
+    protected boolean releaseRetiredClaim(AdoptionRegistry.Identity identity) {
+        try {
+            if (vmInstanceDao.findByUuid(identity.vmUuid) != null) { return false; }
+            adoptionRegistry().finalizeRetirement(identity, uuid -> vmInstanceDao.findByUuid(uuid) == null);
+            logger.info("Released the adoption claim {} of expunged instance {}", identity.claimId, identity.vmUuid);
+            return true;
+        } catch (RuntimeException e) {
+            logger.warn("Could not release the retired adoption claim {}: {}", identity.claimId, e.getMessage());
+            return false;
+        }
     }
 
     @Override
@@ -1074,7 +1112,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     protected Map<String, HostVmStateReportEntry> getVmPowerStates(Host host,
                    Map<String, Map<String, String>> accessDetails, String extensionName, String extensionPath) {
         Map<String, Object> modifiedDetails = loadAccessDetails(accessDetails, null);
-        addNativeStatusBindings(accessDetails, modifiedDetails);
+        List<String> unknown = addNativeStatusBindings(accessDetails, modifiedDetails);
         logger.debug("Trying to get VM power statuses from the external system for {}", host);
         Pair<Boolean, String> result = getInstanceStatusesOnExternalSystem(extensionName, extensionPath,
                 host.getName(), modifiedDetails, AgentManager.Wait.value());
@@ -1103,6 +1141,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             for (Map.Entry<String, com.google.gson.JsonElement> entry : powerStates.entrySet()) {
                 VirtualMachine.PowerState powerState = getPowerStateFromString(entry.getValue().getAsString());
                 states.put(entry.getKey(), new HostVmStateReportEntry(powerState, "host-" + host.getId()));
+            }
+            for (String instanceName : unknown) {
+                states.put(instanceName, new HostVmStateReportEntry(VirtualMachine.PowerState.PowerUnknown, "host-" + host.getId()));
             }
             return states;
         } catch (Exception e) {
@@ -1183,6 +1224,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             Map<String, Object> payload = new HashMap<>(accessDetails);
             payload.remove(NATIVE_CONTEXT);
             nativeOperation = prepareNativeOperation(action, payload, wait);
+            if (nativeOperation != null && nativeOperation.retired) {
+                return new Pair<>(true, "{\"status\":\"success\",\"message\":\"Adoption claim retired; the provider instance is kept\"}");
+            }
             List<String> command = new ArrayList<>();
             command.add(executablePath.toString());
             command.add(action);
@@ -1222,7 +1266,12 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             int exitCode = process.exitValue();
             if (exitCode != 0) {
                 logger.warn("{}: External API execution failed with exit code {}", errorLogPrefix, exitCode);
-                return nativeProcess == null ? new Pair<>(false, "Exit code: " + exitCode + ", Output: " + output.toString().trim()) : nativeUncertainOutcome(action);
+                if (nativeProcess != null && exitCode != NATIVE_KNOWN_FAILURE) { return nativeUncertainOutcome(action); }
+                if (nativeProcess != null) {
+                    // The provider did not change, so this is an ordinary failure and the lease is returned.
+                    nativeOperation.registry.abandon(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
+                }
+                return new Pair<>(false, "Exit code: " + exitCode + ", Output: " + output.toString().trim());
             }
             if (nativeOperation != null && nativeOperation.lease != null) {
                 try {
@@ -1246,13 +1295,25 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                 if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                 return nativeUncertainOutcome(action);
             }
+            abandonUnsentNativeOperation(nativeOperation);
             logger.error("{}: External operation failed", errorLogPrefix, e);
             throw new CloudRuntimeException(String.format("%s: External operation failed", errorLogPrefix), e);
         } catch (RuntimeException e) {
             // Completion/read-back failures after a provider write must not enter
             // ordinary NIC allocation cleanup or trigger a compensating write.
             if (nativeProcess != null) { return nativeUncertainOutcome(action); }
+            abandonUnsentNativeOperation(nativeOperation);
             throw e;
+        }
+    }
+
+    /** The extension was never started, so the lease taken for it fences nothing. */
+    private void abandonUnsentNativeOperation(NativeOperation operation) {
+        if (operation == null || operation.lease == null) { return; }
+        try {
+            operation.registry.abandon(operation.identity, operation.lease.action, operation.lease.id);
+        } catch (RuntimeException e) {
+            logger.warn("Could not return the unused adoption lease {}: {}", operation.lease.id, e.getMessage());
         }
     }
 

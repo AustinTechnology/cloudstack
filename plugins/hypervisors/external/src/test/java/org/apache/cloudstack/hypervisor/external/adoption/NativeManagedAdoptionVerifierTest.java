@@ -20,6 +20,7 @@ import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
+import org.apache.cloudstack.hypervisor.external.refresh.ExternalVmConfiguration;
 import org.apache.cloudstack.acl.SecurityChecker.AccessType;
 import com.cloud.agent.api.Answer;
 import com.cloud.domain.DomainVO;
@@ -110,6 +111,31 @@ public class NativeManagedAdoptionVerifierTest {
         try { work.run(); fail("expected rejection"); } catch (AdoptionRegistry.Conflict e) { assertTrue(e.getMessage(), e.getMessage().contains(diagnostic)); }
     }
     @Test public void managedScaledMovedAndSparseNicPasses() { run(); verify(v.extensionsManager).getInstanceConfig(vm); }
+    @Test public void adoptionUsesItsOwnSnapshotAndIsCheckedTheSameWay() {
+        NativeManagedAdoptionVerifier strict = new NativeManagedAdoptionVerifier() {
+            @Override void requireManagedImport(AdoptionRegistry.Identity i, String node, String manifest) { fail("a bound claim is not a managed import"); }
+        };
+        strict.vmDao = v.vmDao; strict.detailsDao = v.detailsDao; strict.nicDao = v.nicDao; strict.hostDao = v.hostDao; strict.networkDao = v.networkDao;
+        strict.accountDao = v.accountDao; strict.domainDao = v.domainDao; strict.offeringDao = v.offeringDao; strict.accountService = v.accountService;
+        strict.vmManager = v.vmManager; strict.extensionsManager = v.extensionsManager;
+        // Native lifecycle is on for an adoption, and the instance has no managed claim to read through.
+        when(v.extensionsManager.getExternalAccessDetails(host, null)).thenReturn(Map.of("host",
+                Map.of("proxmox_cluster", "p2", "node", "new", "network_bridge", "vmbr0", "native_adoption_lifecycle", "true")));
+        strict.forAdoption(row -> ExternalVmConfiguration.parse(SNAP)).verify(identity, "old", MANIFEST);
+        verify(v.extensionsManager, never()).getInstanceConfig(any());
+        when(offering.getCpu()).thenReturn(4);
+        rejected(() -> strict.forAdoption(row -> ExternalVmConfiguration.parse(SNAP)).verify(identity, "old", MANIFEST), "CPU or memory");
+        when(offering.getCpu()).thenReturn(2);
+        rejected(() -> strict.forAdoption(row -> { throw new AdoptionRegistry.Conflict("the provider instance changed during adoption"); })
+                .verify(identity, "old", MANIFEST), "changed during adoption");
+    }
+    @Test public void instanceThatWasNeverPlacedAndHasNoVmidIsNotACandidate() {
+        VMInstanceVO never = mock(VMInstanceVO.class);
+        when(never.getId()).thenReturn(3L); when(never.getHypervisorType()).thenReturn(HypervisorType.External);
+        when(never.getHostId()).thenReturn(null); when(never.getLastHostId()).thenReturn(null);
+        when(v.vmDao.listAll()).thenReturn(List.of(vm, never));
+        run();
+    }
     private VMInstanceVO candidate(String cluster) {
         VMInstanceVO other = mock(VMInstanceVO.class);
         HostVO otherHost = mock(HostVO.class);

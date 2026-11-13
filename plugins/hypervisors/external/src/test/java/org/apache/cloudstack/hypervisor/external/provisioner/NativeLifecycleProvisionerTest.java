@@ -102,6 +102,29 @@ public class NativeLifecycleProvisionerTest {
         catch (AdoptionRegistry.Conflict expected) { }
         assertFalse(Files.exists(marker));
         verify(registry, never()).complete(any(), anyString(), anyString());
+        // Nothing was sent, so the lease is returned instead of fencing the instance.
+        verify(registry).abandon(any(), eq("plugnic"), eq(LEASE));
+    }
+
+    @Test public void knownFailureReturnsTheLeaseAndIsAnOrdinaryFailure() throws Exception {
+        Pair<Boolean, String> result = run("printf '%s' '{\"status\":\"error\"}'; exit 90", 5);
+        assertFalse(result.first());
+        assertTrue(result.second(), result.second().startsWith("Exit code: 90"));
+        verify(registry).abandon(any(), eq("plugnic"), eq(LEASE));
+        verify(registry, never()).complete(any(), anyString(), anyString());
+    }
+
+    @Test public void expungeRetiresTheClaimWithoutStartingTheExtension() throws Exception {
+        Path marker = dir.resolve("started");
+        Pair<Boolean, String> result = provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("touch " + marker).toString());
+        assertTrue(result.first());
+        assertFalse(Files.exists(marker));
+        verify(registry).retire(any());
+        verify(registry, never()).acquire(any(), anyString());
+        doThrow(new AdoptionRegistry.Conflict("claim cannot retire")).when(registry).retire(any());
+        try { provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("touch " + marker).toString()); fail("operating claim"); }
+        catch (AdoptionRegistry.Conflict expected) { }
+        assertFalse(Files.exists(marker));
     }
 
     @Test public void readonlyRequiresManagedWithoutLease() throws Exception {
@@ -123,6 +146,7 @@ public class NativeLifecycleProvisionerTest {
         assertFalse(run("exit 1", 5).first());
         assertFalse(run("sleep 3", 1).first());
         verify(registry, never()).complete(any(), anyString(), anyString());
+        verify(registry, never()).abandon(any(), anyString(), anyString());
     }
 
     @Test public void mismatchedActuatorAndUnsupportedActionNeverAcquire() throws Exception {
@@ -131,8 +155,8 @@ public class NativeLifecycleProvisionerTest {
         vm.put("proxmox_vmid", "102");
         try { run("exit 0", 5); fail("VMID mismatch"); } catch (IllegalArgumentException expected) { }
         vm.put("proxmox_vmid", "101");
-        try { provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("exit 0").toString());
-            fail("unsupported delete"); } catch (IllegalArgumentException expected) { }
+        try { provisioner.executeExternalCommand("test", "prepare", payload, 5, "test", script("exit 0").toString());
+            fail("unsupported prepare"); } catch (IllegalArgumentException expected) { }
         verify(registry, never()).acquire(any(), anyString());
     }
 

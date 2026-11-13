@@ -265,7 +265,9 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         boolean changed = oldCpu != targetCpu || oldMemory != targetMemory;
         // Metadata refresh uses fresh source reads and a locked native VM binding.
         // It does not authorize adoption, power changes, or claim transitions.
-        if (isAdopted(vm.getId()) && !claimManagedAndIdle(vm.getUuid())) {
+        boolean adopted = isAdopted(vm.getId());
+        String claimStamp = adopted ? claimIdleStamp(vm.getUuid()) : null;
+        if (adopted && claimStamp == null) {
             unresolved.add("adopted instance is not managed or has an operation in progress; report-only");
             if (!dryRun) throw new InvalidParameterValueException("Adopted instance is not managed or has an operation in progress");
         }
@@ -290,8 +292,10 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         for (Map.Entry<ExternalVmConfiguration.Nic, NetworkVO> entry : nicImports.entrySet()) {
             if (!dryRun) {
                 try {
-                    networkOrchestrator.importNic(entry.getKey().mac, ++deviceId, entry.getValue(), nativeNics.isEmpty() && imported.isEmpty(),
-                            vm, null, dataCenterDao.findById(vm.getDataCenterId()), false);
+                    boolean first = nativeNics.isEmpty() && imported.isEmpty();
+                    Pair<com.cloud.vm.NicProfile, Integer> nic = networkOrchestrator.importNic(entry.getKey().mac, ++deviceId, entry.getValue(),
+                            first, vm, null, dataCenterDao.findById(vm.getDataCenterId()), false);
+                    publishNicImport(vm, nic == null || nic.first() == null ? null : nic.first().getId(), entry.getValue(), first);
                 } catch (InsufficientCapacityException e) {
                     throw new CloudRuntimeException("Failed to import NIC " + entry.getKey().mac, e);
                 }
@@ -300,22 +304,34 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         }
         List<ExternalVmRefreshResponse.IpChange> ipChanges = nicRefresh == null ? Collections.emptyList()
                 : nicRefresh.apply(vm, snapshot, evidence, bridge, dryRun, unresolved);
+        // Last, after every provider read: nothing above is committed if an operation started meanwhile.
+        if (adopted && !dryRun && !claimStillIdle(vm.getUuid(), claimStamp)) {
+            throw new InvalidParameterValueException("An operation started on the adopted instance during the refresh; nothing was changed");
+        }
         return new ExternalVmRefreshResponse(vm.getUuid(), dryRun, !dryRun && (changed || !ipChanges.isEmpty() || !imported.isEmpty()),
                 snapshot, oldCpu, oldMemory, unresolved, ipChanges, imported);
     }
 
-    protected boolean claimManagedAndIdle(String vmUuid) {
-        try { return new AdoptionRegistry().managedAndIdle(vmUuid); }
+    protected String claimIdleStamp(String vmUuid) {
+        try { return new AdoptionRegistry().idleStamp(vmUuid); }
+        catch (AdoptionRegistry.Conflict e) { return null; }
+    }
+
+    protected boolean claimStillIdle(String vmUuid, String stamp) {
+        try { return new AdoptionRegistry().stillIdle(vmUuid, stamp); }
         catch (AdoptionRegistry.Conflict e) { return false; }
     }
 
     /** The one L2 guest network the instance's owner may use that carries this NIC's VLAN on the host bridge. */
     NetworkVO importNetwork(VMInstanceVO vm, ExternalVmConfiguration.Nic nic, String bridge) {
+        return importNetwork(accountService.getAccount(vm.getAccountId()), vm.getDataCenterId(), nic, bridge);
+    }
+
+    public NetworkVO importNetwork(Account owner, long zoneId, ExternalVmConfiguration.Nic nic, String bridge) {
         if (bridge == null || nic.vlan == null || !bridge.equals(nic.bridge)) return null;
         String uri = "vlan://" + nic.vlan;
-        Account owner = accountService.getAccount(vm.getAccountId());
         NetworkVO match = null;
-        for (NetworkVO network : networkDao.listByZoneAndUriAndGuestType(vm.getDataCenterId(), uri, Network.GuestType.L2)) {
+        for (NetworkVO network : networkDao.listByZoneAndUriAndGuestType(zoneId, uri, Network.GuestType.L2)) {
             if (network.getRemoved() != null || network.getTrafficType() != TrafficType.Guest
                     || network.getBroadcastUri() == null || !uri.equals(network.getBroadcastUri().toString())) continue;
             try { accountService.checkAccess(owner, AccessType.UseEntry, false, network); }
@@ -328,6 +344,15 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
 
     protected boolean countsRunningOnly() {
         return VirtualMachineManager.ResourceCountRunningVMsonly.value();
+    }
+
+    /** The same usage record and event that adding a NIC through the API leaves. */
+    protected void publishNicImport(VMInstanceVO vm, Long nicId, NetworkVO network, boolean defaultNic) {
+        if (nicId == null) return;
+        UsageEventUtils.publishUsageEvent(EventTypes.EVENT_NETWORK_OFFERING_ASSIGN, vm.getAccountId(), vm.getDataCenterId(), vm.getId(),
+                Long.toString(nicId), network.getNetworkOfferingId(), null, defaultNic ? 1L : 0L, VirtualMachine.class.getName(), vm.getUuid(), vm.isDisplay());
+        com.cloud.event.ActionEventUtils.onCompletedActionEvent(CallContext.current().getCallingUserId(), vm.getAccountId(), "INFO", EventTypes.EVENT_NIC_CREATE,
+                "Imported a NIC found at the provider into network " + network.getUuid(), vm.getId(), "VirtualMachine", 0);
     }
 
     protected void publishUpgrade(VMInstanceVO vm, Map<String, String> parameters) {

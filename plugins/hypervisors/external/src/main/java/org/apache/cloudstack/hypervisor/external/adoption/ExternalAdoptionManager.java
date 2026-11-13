@@ -27,16 +27,24 @@ import com.cloud.user.AccountService;
 import com.cloud.utils.component.ManagerBase;
 import com.cloud.utils.component.PluggableService;
 
-/** Root-admin entry points for the one-time legacy registry migration.
- * The operator must have stopped every legacy writer before import and keep
- * them stopped until handover; nothing here can fence the legacy service. */
+/** Root-admin entry points: the one-time legacy registry migration, recovery of a retained
+ * lease, and adoption of an existing provider guest.
+ * For the migration the operator must have stopped every legacy writer before import and
+ * keep them stopped until handover; nothing here can fence the legacy service. */
 public class ExternalAdoptionManager extends ManagerBase implements PluggableService {
     @Inject AccountService accountService;
     @Inject NativeManagedAdoptionVerifier verifier;
+    @Inject NativeInstanceAdoption adoption;
+
+    /** The export is read from this file on the management server that receives the call. It is
+     * not an API parameter: request parameters are written to the management log, and a large
+     * export exceeds the request size limit. */
+    static final String EXPORT_FILE = "/etc/cloudstack/management/external-adoption-export.json";
+    static final long EXPORT_MAX_BYTES = 64L * 1024 * 1024;
 
     @Override public List<Class<?>> getCommands() {
         return List.of(ImportExternalAdoptionRegistryCmd.class, HandoverExternalAdoptionRegistryCmd.class,
-                ReleaseExternalAdoptionOperationLeaseCmd.class);
+                ReleaseExternalAdoptionOperationLeaseCmd.class, AdoptExternalInstanceCmd.class);
     }
 
     LegacyAdoptionImport importer() { return new LegacyAdoptionImport(); }
@@ -48,6 +56,34 @@ public class ExternalAdoptionManager extends ManagerBase implements PluggableSer
     private void requireRootAdmin() {
         if (!callerIsRootAdmin()) {
             throw new PermissionDeniedException("External adoption migration requires root administrator access");
+        }
+    }
+
+    String readExportFile() {
+        java.nio.file.Path path = java.nio.file.Paths.get(EXPORT_FILE);
+        try {
+            if (!java.nio.file.Files.isRegularFile(path) || java.nio.file.Files.size(path) > EXPORT_MAX_BYTES) {
+                throw new InvalidParameterValueException("Legacy adoption import rejected: " + EXPORT_FILE
+                        + " is missing on this management server or is too large");
+            }
+            return new String(java.nio.file.Files.readAllBytes(path), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            throw new InvalidParameterValueException("Legacy adoption import rejected: " + EXPORT_FILE + " cannot be read");
+        }
+    }
+
+    public ExternalAdoptionRegistryResponse importExportFile(boolean dryRun) {
+        requireRootAdmin();
+        return importExport(readExportFile(), dryRun);
+    }
+
+    /** Adopt one existing provider guest. See NativeInstanceAdoption. */
+    public ExternalAdoptionResponse adopt(NativeInstanceAdoption.Request request) {
+        requireRootAdmin();
+        try {
+            return adoption.adopt(request);
+        } catch (IllegalArgumentException | AdoptionRegistry.Conflict e) {
+            throw new InvalidParameterValueException("External adoption rejected: " + e.getMessage());
         }
     }
 

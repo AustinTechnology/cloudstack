@@ -53,6 +53,7 @@
         <property name="name" value="ExternalObservationService" />
     </bean>
     <bean id="NativeManagedAdoptionVerifier" class="org.apache.cloudstack.hypervisor.external.adoption.NativeManagedAdoptionVerifier" />
+    <bean id="NativeInstanceAdoption" class="org.apache.cloudstack.hypervisor.external.adoption.NativeInstanceAdoption" />
     <bean id="ExternalAdoptionManager" class="org.apache.cloudstack.hypervisor.external.adoption.ExternalAdoptionManager">
         <property name="name" value="ExternalAdoptionManager" />
     </bean>

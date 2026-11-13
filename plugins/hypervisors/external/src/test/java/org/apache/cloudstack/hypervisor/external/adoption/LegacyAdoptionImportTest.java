@@ -4,6 +4,7 @@
 // The ASF licenses this file to You under the Apache License, Version 2.0.
 package org.apache.cloudstack.hypervisor.external.adoption;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -53,6 +54,28 @@ public class LegacyAdoptionImportTest {
 
     @Test public void unfinishedExecutionOfManagedClaimIsRefused() {
         refused(export("managed", "start_unknown"), "execution " + EXECUTION + " is start_unknown");
+    }
+
+    @Test public void finishedHistoryOfAReleasedOrReAdoptedClaimIsAcceptedAndNotImported() {
+        for (String state : new String[] {"succeeded", "failed", "rolled_back"}) {
+            ObjectNode root = export("released", state);
+            ((ObjectNode) root.get("adoption_executions").get(0)).putNull("cloudstack_vm_ref").put("error_code", "deploy_job_failed");
+            LegacyAdoptionImport.requireSettled(root);
+            assertTrue(LegacyAdoptionImport.currentExecutions(root).isEmpty());
+        }
+        // An execution of generation 1 after the claim was adopted again as generation 2.
+        ObjectNode root = export("managed", "rolled_back");
+        ((ObjectNode) root.get("adoption_claims").get(0)).put("generation", 2);
+        LegacyAdoptionImport.requireSettled(root);
+        assertTrue(LegacyAdoptionImport.currentExecutions(root).isEmpty());
+        assertEquals(1, LegacyAdoptionImport.currentExecutions(export("managed", "succeeded")).size());
+    }
+
+    @Test public void unfinishedHistoryIsStillRefused() {
+        refused(export("released", "cleanup_required"), "execution " + EXECUTION + " is cleanup_required");
+        ObjectNode root = export("released", "failed");
+        ((ObjectNode) root.get("adoption_executions").get(0)).put("worker_lease_id", "worker");
+        refused(root, "execution " + EXECUTION + " is failed");
     }
 
     @Test public void leaseAndHeldAuthorityAreRefused() {

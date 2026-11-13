@@ -74,7 +74,7 @@ public final class LegacyAdoptionImport {
             if (!dryRun) {
                 for (JsonNode claim : root.get(ARRAYS[0])) { insertClaim(c, claim); }
                 for (JsonNode row : root.get(ARRAYS[1])) { insertTyped(c, row, "external_adoption_operation_leases", LEASE_COLUMNS); }
-                for (JsonNode row : root.get(ARRAYS[2])) { insertTyped(c, row, "external_adoption_executions", EXECUTION_COLUMNS); }
+                for (JsonNode row : currentExecutions(root)) { insertTyped(c, row, "external_adoption_executions", EXECUTION_COLUMNS); }
                 for (JsonNode row : root.get(ARRAYS[3])) { insertTyped(c, row, "external_adoption_write_authority", AUTHORITY_COLUMNS); }
                 try (PreparedStatement s = c.prepareStatement("INSERT INTO external_adoption_legacy_export (id,export_json,imported_at) VALUES (1,?,SYSDATE(6))")) {
                     s.setString(1, exportJson);
@@ -91,6 +91,25 @@ public final class LegacyAdoptionImport {
     /** Handover accepts only a settled registry and an import cannot be repeated, so an export
      * with anything unfinished is refused here, in a dry run as well. Finish or remove those
      * adoptions in the legacy registry, then export again. */
+    /** History is an execution that can no longer act: its claim was released, or the claim
+     * has moved to a later generation. It stays in the archived export and is not imported,
+     * so it neither blocks the handover nor a later adoption of the same guest. */
+    static boolean history(JsonNode execution, JsonNode claims) {
+        for (JsonNode claim : claims) {
+            if (claim.get("id").textValue().equals(execution.get("claim_id").textValue())) {
+                return "released".equals(claim.get("state").textValue())
+                        || execution.get("generation").intValue() < claim.get("generation").intValue();
+            }
+        }
+        return false;
+    }
+
+    static java.util.List<JsonNode> currentExecutions(JsonNode root) {
+        java.util.List<JsonNode> rows = new java.util.ArrayList<>();
+        for (JsonNode e : root.get(ARRAYS[2])) { if (!history(e, root.get(ARRAYS[0]))) { rows.add(e); } }
+        return rows;
+    }
+
     static void requireSettled(JsonNode root) {
         java.util.List<String> open = new java.util.ArrayList<>();
         java.util.Map<String, String> claimStates = new java.util.HashMap<>();
@@ -104,6 +123,12 @@ public final class LegacyAdoptionImport {
         if (root.get(ARRAYS[1]).size() != 0) { open.add(root.get(ARRAYS[1]).size() + " operation lease(s)"); }
         for (JsonNode e : root.get(ARRAYS[2])) {
             String state = e.get("state").textValue();
+            if (history(e, root.get(ARRAYS[0]))) {
+                boolean finished = java.util.Set.of("succeeded", "failed", "rolled_back").contains(state)
+                        && e.get("worker_lease_id").isNull() && e.get("worker_lease_expires_at").isNull();
+                if (!finished) { open.add("execution " + e.get("id").textValue() + " is " + state); }
+                continue;
+            }
             boolean settled = "managed".equals(claimStates.get(e.get("claim_id").textValue() + "/" + e.get("generation").intValue()))
                     && "succeeded".equals(state) && e.get("worker_lease_id").isNull() && e.get("worker_lease_expires_at").isNull()
                     && e.get("error_code").isNull() && !e.get("cloudstack_vm_ref").isNull() && !e.get("cloudstack_instance_name").isNull();
@@ -266,7 +291,7 @@ public final class LegacyAdoptionImport {
             rejectRows(c,"SELECT 1 FROM external_adoption_operation_leases LIMIT 1 FOR UPDATE");
             rejectRows(c,"SELECT 1 FROM external_adoption_write_authority WHERE id<>1 OR mode IS NOT NULL OR owner_id IS NOT NULL OR target IS NOT NULL OR expires_at IS NOT NULL LIMIT 1 FOR UPDATE");
             rejectRows(c,"SELECT 1 FROM external_adoption_executions e LEFT JOIN external_adoption_claims c ON c.id=e.claim_id AND c.generation=e.generation WHERE c.id IS NULL OR BINARY c.state<>BINARY 'managed' OR BINARY e.state<>BINARY 'succeeded' OR e.worker_lease_id IS NOT NULL OR e.worker_lease_expires_at IS NOT NULL OR e.error_code IS NOT NULL OR e.cloudstack_vm_ref IS NULL OR e.cloudstack_instance_name IS NULL OR BINARY e.id<>BINARY e.cloudstack_vm_ref OR BINARY e.cloudstack_vm_ref<>BINARY c.cloudstack_vm_ref OR BINARY e.cloudstack_instance_name<>BINARY c.cloudstack_instance_name LIMIT 1 FOR UPDATE");
-            checkKnownColumns(c,"external_adoption_executions",EXECUTION_COLUMNS,archive.get("adoption_executions"));
+            checkKnownColumns(c,"external_adoption_executions",EXECUTION_COLUMNS,currentExecutions(archive));
             checkKnownColumns(c,"external_adoption_write_authority",AUTHORITY_COLUMNS,archive.get("adoption_write_authority"));
             try (PreparedStatement s=c.prepareStatement("SELECT plan_json,plan_sha256 FROM external_adoption_executions FOR UPDATE"); ResultSet r=s.executeQuery()) {
                 while (r.next()) {
@@ -276,7 +301,9 @@ public final class LegacyAdoptionImport {
                     catch (java.io.IOException | NullPointerException e) { throw new AdoptionRegistry.Conflict("invalid execution plan",e); }
                 }
             }
-            try (PreparedStatement s=c.prepareStatement("SELECT id,generation,proxmox_cluster,proxmox_vmid,manifest_sha256,cloudstack_vm_ref,cloudstack_instance_name,state,operation_lease_id,migration_fenced,proxmox_node,manifest_json FROM external_adoption_claims FOR UPDATE"); ResultSet r=s.executeQuery()) {
+            // Every instance is checked, so one run names all that have to be fixed.
+            java.util.List<String> failed = new java.util.ArrayList<>();
+            try (PreparedStatement s=c.prepareStatement("SELECT id,generation,proxmox_cluster,proxmox_vmid,manifest_sha256,cloudstack_vm_ref,cloudstack_instance_name,state,operation_lease_id,migration_fenced,proxmox_node,manifest_json FROM external_adoption_claims ORDER BY proxmox_cluster,proxmox_vmid FOR UPDATE"); ResultSet r=s.executeQuery()) {
                 while (r.next()) {
                     String state=r.getString(8);
                     if (!r.getBoolean(10) || r.getString(9)!=null || !("managed".equals(state) || "released".equals(state))) { throw new AdoptionRegistry.Conflict("legacy claim is not quiescent"); }
@@ -287,9 +314,15 @@ public final class LegacyAdoptionImport {
                     AdoptionRegistry.manifest(json,hash,cluster,node,vmid);
                     if ("managed".equals(state)) {
                         AdoptionRegistry.Identity identity=new AdoptionRegistry.Identity(id,generation,cluster,vmid,hash,r.getString(6),r.getString(7));
-                        verifier.verify(identity,node,json);
+                        try { verifier.verify(identity,node,json); }
+                        catch (AdoptionRegistry.Conflict e) { failed.add(cluster + " VMID " + vmid + " (" + identity.instanceName + "): " + e.getMessage()); }
                     }
                 }
+            }
+            if (!failed.isEmpty()) {
+                int shown = Math.min(failed.size(), 25);
+                throw new AdoptionRegistry.Conflict(failed.size() + " instance(s) failed verification: " + String.join("; ", failed.subList(0, shown))
+                        + (failed.size() > shown ? "; and " + (failed.size() - shown) + " more" : ""));
             }
             try (PreparedStatement s=c.prepareStatement("UPDATE external_adoption_claims SET migration_fenced=FALSE WHERE migration_fenced=TRUE")) { s.executeUpdate(); }
             try (PreparedStatement s=c.prepareStatement("UPDATE external_adoption_control SET legacy_fenced=FALSE WHERE id=1 AND legacy_fenced=TRUE")) {
@@ -305,7 +338,7 @@ public final class LegacyAdoptionImport {
         }
     }
 
-    private static void checkKnownColumns(Connection c, String table, String[] columns, JsonNode archivedRows) throws SQLException {
+    private static void checkKnownColumns(Connection c, String table, String[] columns, Iterable<JsonNode> archivedRows) throws SQLException {
         Set<String> known=new HashSet<>(java.util.Arrays.asList(columns));
         Set<JsonNode> remaining=new HashSet<>();
         for (JsonNode row : archivedRows) { if (!remaining.add(row)) { throw new AdoptionRegistry.Conflict("duplicate archived row"); } }
