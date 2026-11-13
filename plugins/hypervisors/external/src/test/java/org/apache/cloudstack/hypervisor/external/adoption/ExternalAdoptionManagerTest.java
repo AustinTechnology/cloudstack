@@ -42,7 +42,14 @@ public class ExternalAdoptionManagerTest {
         assertThrows(InvalidParameterValueException.class,
                 () -> manager(true, new IllegalArgumentException("invalid export envelope")).handover());
     }
-    @Test public void exposesBothCommands() {
-        assertEquals(2, new ExternalAdoptionManager().getCommands().size());
+    @Test public void exposesAllCommands() {
+        assertEquals(3, new ExternalAdoptionManager().getCommands().size());
+    }
+    @Test public void leaseReleaseIsRootOnlyAndRejectsMalformedIdentityBeforeTheDatabase() {
+        String id = "f8e69503-33a5-4093-a336-7c11116b4cc3";
+        assertThrows(PermissionDeniedException.class, () -> manager(false, null).releaseOperationLease(id, 1, id));
+        assertThrows(InvalidParameterValueException.class, () -> manager(true, null).releaseOperationLease("not-a-uuid", 1, id));
+        assertThrows(InvalidParameterValueException.class, () -> manager(true, null).releaseOperationLease(id, 1, id.toUpperCase()));
+        assertThrows(InvalidParameterValueException.class, () -> manager(true, null).releaseOperationLease(id, null, id));
     }
 }

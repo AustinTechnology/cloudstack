@@ -439,6 +439,27 @@ public final class AdoptionRegistry {
         });
     }
 
+    /** Operator recovery after an unknown outcome. The operator has inspected the
+     * guest and names the exact claim, generation and lease; expiry is irrelevant
+     * and nothing here is ever called automatically or replays the operation. */
+    public void releaseUnknownOperation(String claimId, int generation, String leaseId) {
+        canonicalUuid(claimId); canonicalUuid(leaseId);
+        if (generation <= 0) { throw new IllegalArgumentException("invalid claim generation"); }
+        transaction(c -> {
+            lockControl(c);
+            try (PreparedStatement s = c.prepareStatement("UPDATE external_adoption_claims SET state='managed',operation_lease_id=NULL,updated_at=SYSDATE(6) " +
+                    "WHERE BINARY id=BINARY ? AND generation=? AND state='operating' AND BINARY operation_lease_id=BINARY ? AND migration_fenced=0")) {
+                s.setString(1, claimId); s.setInt(2, generation); s.setString(3, leaseId);
+                if (s.executeUpdate() != 1) { throw new Conflict("no operating claim holds that exact lease"); }
+            }
+            try (PreparedStatement s = c.prepareStatement("DELETE FROM external_adoption_operation_leases WHERE BINARY id=BINARY ? AND BINARY claim_id=BINARY ? AND generation=?")) {
+                s.setString(1, leaseId); s.setString(2, claimId); s.setInt(3, generation);
+                if (s.executeUpdate() != 1) { throw new Conflict("claim and lease row disagree"); }
+            }
+            return null;
+        });
+    }
+
     /** Retire is metadata-only; even expired operating claims remain fenced. */
     public void retire(Identity i) {
         transaction(c -> {

@@ -35,7 +35,8 @@ public class ExternalAdoptionManager extends ManagerBase implements PluggableSer
     @Inject NativeManagedAdoptionVerifier verifier;
 
     @Override public List<Class<?>> getCommands() {
-        return List.of(ImportExternalAdoptionRegistryCmd.class, HandoverExternalAdoptionRegistryCmd.class);
+        return List.of(ImportExternalAdoptionRegistryCmd.class, HandoverExternalAdoptionRegistryCmd.class,
+                ReleaseExternalAdoptionOperationLeaseCmd.class);
     }
 
     LegacyAdoptionImport importer() { return new LegacyAdoptionImport(); }
@@ -70,6 +71,19 @@ public class ExternalAdoptionManager extends ManagerBase implements PluggableSer
             importer().handover(verifier);
         } catch (IllegalArgumentException | AdoptionRegistry.Conflict e) {
             throw new InvalidParameterValueException("Legacy adoption handover rejected: " + e.getMessage());
+        }
+        return state();
+    }
+
+    AdoptionRegistry registry() { return new AdoptionRegistry(); }
+
+    /** Operator recovery of one retained lease after inspecting the guest; never replays the operation. */
+    public ExternalAdoptionRegistryResponse releaseOperationLease(String claimId, Integer generation, String leaseId) {
+        requireRootAdmin();
+        try {
+            registry().releaseUnknownOperation(claimId, generation == null ? 0 : generation, leaseId);
+        } catch (IllegalArgumentException | AdoptionRegistry.Conflict e) {
+            throw new InvalidParameterValueException("External adoption lease release rejected: " + e.getMessage());
         }
         return state();
     }
