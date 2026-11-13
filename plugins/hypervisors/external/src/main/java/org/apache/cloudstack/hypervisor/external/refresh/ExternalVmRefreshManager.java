@@ -26,12 +26,21 @@ import java.util.Map;
 import java.util.Objects;
 import javax.inject.Inject;
 
+import org.apache.cloudstack.acl.SecurityChecker.AccessType;
 import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
+import org.apache.cloudstack.hypervisor.external.adoption.AdoptionRegistry;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.hypervisor.external.observation.ExternalObservationService;
 import org.apache.cloudstack.hypervisor.external.observation.ObservationBindingResolver;
 import org.apache.cloudstack.hypervisor.external.observation.ObservationValidation;
+import com.cloud.dc.dao.DataCenterDao;
+import com.cloud.exception.InsufficientCapacityException;
+import com.cloud.network.Network;
+import com.cloud.network.Networks.TrafficType;
 import com.cloud.network.dao.NetworkDao;
+import com.cloud.network.dao.NetworkVO;
+import com.cloud.user.Account;
 import com.cloud.agent.api.Answer;
 import com.cloud.event.EventTypes;
 import com.cloud.event.UsageEventUtils;
@@ -75,6 +84,8 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
     @Inject NetworkDao networkDao;
     @Inject ObservationBindingResolver observationBindingResolver;
     @Inject ExternalObservationService observationService;
+    @Inject NetworkOrchestrationService networkOrchestrator;
+    @Inject DataCenterDao dataCenterDao;
 
     @Override public List<Class<?>> getCommands() { return List.of(RefreshExternalVirtualMachineCmd.class); }
 
@@ -231,9 +242,22 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         if (base.getCpu() != null && oldCpu != snapshot.cpus) unresolved.add("fixed offering CPU drift is report-only");
         if (base.getRamSize() != null && oldMemory != snapshot.memoryMb) unresolved.add("fixed offering memory drift is report-only");
         List<NicVO> nativeNics = nicDao.listByVmId(vm.getId());
+        // A NIC added at the provider is imported when exactly one of the owner's L2 networks
+        // has its VLAN on the host bridge. A NIC removed at the provider is only reported.
+        Map<ExternalVmConfiguration.Nic, NetworkVO> nicImports = new java.util.LinkedHashMap<>();
         for (ExternalVmConfiguration.Nic providerNic : snapshot.nics) {
             if (nativeNics.stream().noneMatch(n -> providerNic.mac.equalsIgnoreCase(n.getMacAddress()))) {
-                unresolved.add("provider-only NIC " + providerNic.deviceId + " (" + providerNic.mac + ")");
+                NetworkVO network = importNetwork(vm, providerNic, bridge);
+                if (network == null) {
+                    unresolved.add("provider-only NIC " + providerNic.deviceId + " (" + providerNic.mac + ") has no unique matching network");
+                } else {
+                    nicImports.put(providerNic, network);
+                }
+            }
+        }
+        for (NicVO nativeNic : nativeNics) {
+            if (snapshot.nics.stream().noneMatch(n -> n.mac.equalsIgnoreCase(nativeNic.getMacAddress()))) {
+                unresolved.add("native-only NIC " + nativeNic.getUuid() + " (" + nativeNic.getMacAddress() + ") is report-only");
             }
         }
         if (!snapshot.agentAvailable) unresolved.add("guest agent unavailable; only qualified observation fallback may update addresses");
@@ -241,9 +265,9 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         boolean changed = oldCpu != targetCpu || oldMemory != targetMemory;
         // Metadata refresh uses fresh source reads and a locked native VM binding.
         // It does not authorize adoption, power changes, or claim transitions.
-        if (changed && isAdopted(vm.getId())) {
-            unresolved.add("adopted instance apply requires native registry integration; report-only");
-            if (!dryRun) throw new CloudRuntimeException("Native adoption registry integration is required before applying refresh");
+        if (isAdopted(vm.getId()) && !claimManagedAndIdle(vm.getUuid())) {
+            unresolved.add("adopted instance is not managed or has an operation in progress; report-only");
+            if (!dryRun) throw new InvalidParameterValueException("Adopted instance is not managed or has an operation in progress");
         }
         if (changed && !dryRun) {
             VMTemplateVO template = templateDao.findByIdIncludingRemoved(vm.getTemplateId());
@@ -261,9 +285,45 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
             }
             publishUpgrade(vm, parameters);
         }
+        List<String> imported = new ArrayList<>();
+        int deviceId = nativeNics.stream().mapToInt(NicVO::getDeviceId).max().orElse(-1);
+        for (Map.Entry<ExternalVmConfiguration.Nic, NetworkVO> entry : nicImports.entrySet()) {
+            if (!dryRun) {
+                try {
+                    networkOrchestrator.importNic(entry.getKey().mac, ++deviceId, entry.getValue(), nativeNics.isEmpty() && imported.isEmpty(),
+                            vm, null, dataCenterDao.findById(vm.getDataCenterId()), false);
+                } catch (InsufficientCapacityException e) {
+                    throw new CloudRuntimeException("Failed to import NIC " + entry.getKey().mac, e);
+                }
+            }
+            imported.add(entry.getKey().mac + " on " + entry.getValue().getUuid());
+        }
         List<ExternalVmRefreshResponse.IpChange> ipChanges = nicRefresh == null ? Collections.emptyList()
                 : nicRefresh.apply(vm, snapshot, evidence, bridge, dryRun, unresolved);
-        return new ExternalVmRefreshResponse(vm.getUuid(), dryRun, !dryRun && (changed || !ipChanges.isEmpty()), snapshot, oldCpu, oldMemory, unresolved, ipChanges);
+        return new ExternalVmRefreshResponse(vm.getUuid(), dryRun, !dryRun && (changed || !ipChanges.isEmpty() || !imported.isEmpty()),
+                snapshot, oldCpu, oldMemory, unresolved, ipChanges, imported);
+    }
+
+    protected boolean claimManagedAndIdle(String vmUuid) {
+        try { return new AdoptionRegistry().managedAndIdle(vmUuid); }
+        catch (AdoptionRegistry.Conflict e) { return false; }
+    }
+
+    /** The one L2 guest network the instance's owner may use that carries this NIC's VLAN on the host bridge. */
+    NetworkVO importNetwork(VMInstanceVO vm, ExternalVmConfiguration.Nic nic, String bridge) {
+        if (bridge == null || nic.vlan == null || !bridge.equals(nic.bridge)) return null;
+        String uri = "vlan://" + nic.vlan;
+        Account owner = accountService.getAccount(vm.getAccountId());
+        NetworkVO match = null;
+        for (NetworkVO network : networkDao.listByZoneAndUriAndGuestType(vm.getDataCenterId(), uri, Network.GuestType.L2)) {
+            if (network.getRemoved() != null || network.getTrafficType() != TrafficType.Guest
+                    || network.getBroadcastUri() == null || !uri.equals(network.getBroadcastUri().toString())) continue;
+            try { accountService.checkAccess(owner, AccessType.UseEntry, false, network); }
+            catch (RuntimeException denied) { continue; }
+            if (match != null) return null;
+            match = network;
+        }
+        return match;
     }
 
     protected boolean countsRunningOnly() {

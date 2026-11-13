@@ -186,12 +186,12 @@ public class ExternalRefreshWorkerTest {
         when(b.getValue()).thenReturn("101");
         when(w.hostDao.findById(5L)).thenReturn(null); assertFalse(w.unique(1, "cluster-a", "101"));
     }
-    @Test public void adoptionMarkersAndClaimsAreExcluded() throws Exception {
+    @Test public void adoptedNeedsAClaimAndOthersMustHaveNone() throws Exception {
         Eligibility e = eligibleFixture(); VMInstanceVO vm = e.vmDao.findById(1L);
         detail(e, "External:adopt_claim_id", "claim"); assertFalse(e.eligible(vm));
+        e.claim = true; assertTrue(e.eligible(vm));
         when(e.detailsDao.findDetails(1L, "External:adopt_claim_id")).thenReturn(Collections.emptyList());
-        detail(e, "adopt_existing", "true"); assertFalse(e.eligible(vm));
-        when(e.detailsDao.findDetails(1L, "adopt_existing")).thenReturn(Collections.emptyList());
-        e.claim = true; assertFalse(e.eligible(vm));
+        assertFalse(e.eligible(vm));
+        detail(e, "adopt_existing", "true"); assertTrue(e.eligible(vm));
     }
 }

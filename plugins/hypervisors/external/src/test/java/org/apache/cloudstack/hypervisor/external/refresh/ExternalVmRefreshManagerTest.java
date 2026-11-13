@@ -106,13 +106,58 @@ public class ExternalVmRefreshManagerTest {
         verify(manager, never()).publishUpgrade(any(), anyMap());
     }
 
-    @Test public void adoptedApplyRequiresRegistryIntegration() {
+    @Test public void adoptedApplyRequiresManagedIdleClaim() {
         when(manager.detailsDao.findDetails(10L, "External:adopt_existing")).thenReturn(
                 java.util.List.of(new com.cloud.vm.VMInstanceDetailVO(10L, "External:adopt_existing", "true", false)));
+        when(vm.getUuid()).thenReturn("vm-uuid");
+        doReturn(false).when(manager).claimManagedAndIdle("vm-uuid");
         assertThrows(RuntimeException.class, () -> manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), false));
         verifyNoInteractions(manager.resourceLimits);
         verify(manager.detailsDao, never()).persist(any());
         verify(manager, never()).publishUpgrade(any(), anyMap());
+        manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), true);
+        doReturn(true).when(manager).claimManagedAndIdle("vm-uuid");
+        manager.reconcile(vm, ExternalVmConfiguration.parse(SNAPSHOT), false);
+        verify(manager).publishUpgrade(eq(vm), anyMap());
+    }
+
+    private static final String NIC_SNAPSHOT = SNAPSHOT.replace("\"cpus\":4,\"memory_mb\":8192", "\"cpus\":2,\"memory_mb\":4096")
+            .replace("\"nics\":[]", "\"nics\":[{\"device_id\":1,\"mac\":\"02:00:00:00:00:09\",\"bridge\":\"vmbr1\",\"vlan\":101,\"ip_addresses\":[]}]");
+
+    private com.cloud.network.dao.NetworkVO network(String uri) {
+        com.cloud.network.dao.NetworkVO n = mock(com.cloud.network.dao.NetworkVO.class);
+        when(n.getTrafficType()).thenReturn(com.cloud.network.Networks.TrafficType.Guest);
+        when(n.getBroadcastUri()).thenReturn(java.net.URI.create(uri));
+        when(n.getUuid()).thenReturn("net-" + uri);
+        return n;
+    }
+
+    private void nicImportFixture(java.util.List<com.cloud.network.dao.NetworkVO> networks) {
+        manager.networkDao = mock(com.cloud.network.dao.NetworkDao.class);
+        manager.accountService = mock(com.cloud.user.AccountService.class);
+        manager.networkOrchestrator = mock(org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService.class);
+        manager.dataCenterDao = mock(com.cloud.dc.dao.DataCenterDao.class);
+        when(vm.getDataCenterId()).thenReturn(1L);
+        when(manager.networkDao.listByZoneAndUriAndGuestType(1L, "vlan://101", com.cloud.network.Network.GuestType.L2)).thenReturn(networks);
+    }
+
+    @Test public void providerOnlyNicIsImportedOnTheOneMatchingNetwork() throws Exception {
+        com.cloud.network.dao.NetworkVO net = network("vlan://101");
+        nicImportFixture(java.util.List.of(net));
+        manager.reconcile(vm, ExternalVmConfiguration.parse(NIC_SNAPSHOT), true, null, Collections.emptyMap(), "vmbr1");
+        verifyNoInteractions(manager.networkOrchestrator);
+        manager.reconcile(vm, ExternalVmConfiguration.parse(NIC_SNAPSHOT), false, null, Collections.emptyMap(), "vmbr1");
+        verify(manager.networkOrchestrator).importNic(eq("02:00:00:00:00:09"), eq(0), eq(net), eq(true), eq(vm), isNull(), any(), eq(false));
+    }
+
+    @Test public void providerOnlyNicWithoutUniqueNetworkIsNotImported() {
+        nicImportFixture(java.util.List.of(network("vlan://101"), network("vlan://101")));
+        manager.reconcile(vm, ExternalVmConfiguration.parse(NIC_SNAPSHOT), false, null, Collections.emptyMap(), "vmbr1");
+        nicImportFixture(java.util.List.of(network("vlan://101")));
+        manager.reconcile(vm, ExternalVmConfiguration.parse(NIC_SNAPSHOT), false, null, Collections.emptyMap(), "vmbr9");
+        nicImportFixture(java.util.List.of(network("vlan://100-200")));
+        manager.reconcile(vm, ExternalVmConfiguration.parse(NIC_SNAPSHOT), false, null, Collections.emptyMap(), "vmbr1");
+        verifyNoInteractions(manager.networkOrchestrator);
     }
 
     @Test public void appliesCustomValuesWithResourceAndUsageAccounting() {

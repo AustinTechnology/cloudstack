@@ -32,6 +32,7 @@ public class ExternalVmRefreshResponse extends BaseResponse {
     @SerializedName("agentavailable") private boolean agentAvailable;
     @SerializedName("unresolved") private List<String> unresolved;
     @SerializedName("ipchanges") private List<IpChange> ipChanges;
+    @SerializedName("nicimports") private List<String> nicImports;
 
     public static final class IpChange {
         @SerializedName("nicid") final String nicId;
@@ -45,7 +46,8 @@ public class ExternalVmRefreshResponse extends BaseResponse {
     }
 
     ExternalVmRefreshResponse(String id, boolean dryRun, boolean applied, ExternalVmConfiguration snapshot,
-            int currentCpus, int currentMemoryMb, List<String> unresolved, List<IpChange> ipChanges) {
+            int currentCpus, int currentMemoryMb, List<String> unresolved, List<IpChange> ipChanges, List<String> nicImports) {
+        this.nicImports = nicImports;
         this.id = id;
         this.dryRun = dryRun;
         this.applied = applied;

@@ -350,6 +350,20 @@ public final class AdoptionRegistry {
         }
     }
 
+    /** For work that changes only CloudStack records, such as a metadata refresh. It takes no
+     * lease, and is refused while the claim is fenced, operating or anything but managed. */
+    public boolean managedAndIdle(String vmUuid) {
+        return transaction(c -> {
+            lockControl(c);
+            try (PreparedStatement s = c.prepareStatement("SELECT state,operation_lease_id,migration_fenced FROM external_adoption_claims WHERE BINARY cloudstack_vm_ref=BINARY ? FOR UPDATE")) {
+                s.setString(1, vmUuid);
+                try (ResultSet r = s.executeQuery()) {
+                    return r.next() && "managed".equals(r.getString(1)) && r.getString(2) == null && !r.getBoolean(3) && !r.next();
+                }
+            }
+        });
+    }
+
     /** State alone is not permission for a mutation: acquire a lease. */
     public String validatedState(Identity i) {
         return transaction(c -> {

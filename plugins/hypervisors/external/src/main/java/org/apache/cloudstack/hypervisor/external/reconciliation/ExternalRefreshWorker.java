@@ -202,7 +202,7 @@ public class ExternalRefreshWorker extends ManagerBase implements Configurable {
         if (vm == null || vm.getRemoved() != null || vm.getType() != VirtualMachine.Type.User || vm.getHypervisorType() != HypervisorType.External
                 || (vm.getState() != VirtualMachine.State.Running && vm.getState() != VirtualMachine.State.Stopped)) return false;
         if (!UUID.fromString(vm.getUuid()).toString().equals(vm.getUuid())) return false;
-        if (vm.getInstanceName() == null || vm.getInstanceName().isEmpty() || hasAdoptionMarker(vm.getId())) return false;
+        if (vm.getInstanceName() == null || vm.getInstanceName().isEmpty()) return false;
         Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
         HostVO host = hostId == null ? null : hostDao.findById(hostId);
         if (host == null || host.getRemoved() != null || host.getHypervisorType() != HypervisorType.External || host.getClusterId() == null || !clusterEnabled(host.getClusterId())) return false;
@@ -214,7 +214,10 @@ public class ExternalRefreshWorker extends ManagerBase implements Configurable {
         AdoptionRegistry.canonicalCluster(cluster);
         String ownCluster = aliases(vm.getId(), "proxmox_cluster");
         if (ownCluster != null && !cluster.equals(ownCluster)) return false;
-        return unique(vm.getId(), cluster, vmid) && !hasClaim(vm.getUuid(), vm.getInstanceName(), cluster, vmid);
+        // An adopted instance must have a claim and any other instance must not. The refresh
+        // itself then requires that claim to be managed with no operation in progress.
+        return unique(vm.getId(), cluster, vmid)
+                && hasAdoptionMarker(vm.getId()) == hasClaim(vm.getUuid(), vm.getInstanceName(), cluster, vmid);
     }
     void apply(VMInstanceVO vm) { refresh.refresh(vm.getId(), false); }
     void runOnce() {
