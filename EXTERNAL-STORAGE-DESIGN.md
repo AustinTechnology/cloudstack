@@ -116,7 +116,7 @@ Proxmox has no per-disk snapshot, but 210 of the 217 disks are RBD images, and C
 What is known:
 
 - CloudStack does not talk to Ceph from the management server. Its KVM host agents do, with the Ceph libraries (`KVMStorageProcessor`). Production has 8 KVM hosts and 5 KVM pools on the same Ceph pool names, so the machinery and the credentials already exist there.
-- Proxmox does not know about a snapshot made outside it. When it deletes a disk it removes every snapshot of the image first, protected ones included (`RBDPlugin.pm`, `free_image`, read on PVE 9.2). Moving a disk to another storage copies only the current state and then deletes the source the same way.
+- Proxmox does not know about a snapshot made outside it. When it deletes a disk it removes every snapshot of the image first, protected ones included (`RBDPlugin.pm`, `free_image`, read on PVE 9.2). Moving a disk to another storage is expected to copy only the current state and delete the source the same way; that path was not read.
 - Proxmox's own whole-VM snapshots are RBD snapshots on each disk, named after the VM snapshot. Names must not collide.
 - Rolling one image back is only safe with the guest stopped. A snapshot of one disk of a running guest is crash-consistent.
 - Production has `snapshot.backup.to.secondary=true`, so a CloudStack volume snapshot is copied to secondary storage after it is taken. For multi-terabyte disks these snapshots would have to stay on Ceph instead.
