@@ -52,7 +52,7 @@ import com.cloud.utils.db.TransactionLegacy;
 public final class AdoptionRegistry {
     private static final Set<String> ACTIONS = new HashSet<>(Arrays.asList(
             "console", "start", "stop", "reboot", "create_snapshot", "restore_snapshot", "delete_snapshot",
-            "setha", "scale", "plugnic", "unplugnic"));
+            "setha", "scale", "plugnic", "unplugnic", "adddisk", "resizedisk", "deletedisk", "movedisk"));
     private static final int LEASE_SECONDS = 7200;
 
     public static final class Conflict extends RuntimeException {

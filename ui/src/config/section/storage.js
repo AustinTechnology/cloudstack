@@ -145,7 +145,7 @@ export default {
           label: 'label.action.detach.disk',
           message: 'message.detach.disk',
           dataView: true,
-          show: (record) => { return record.virtualmachineid && ['Running', 'Stopped', 'Destroyed'].includes(record.vmstate) }
+          show: (record) => { return record.virtualmachineid && record.hypervisor !== 'External' && ['Running', 'Stopped', 'Destroyed'].includes(record.vmstate) }
         },
         {
           api: 'updateVolume',
@@ -169,7 +169,7 @@ export default {
           label: 'label.action.take.snapshot',
           dataView: true,
           show: (record, store) => {
-            return record.state === 'Ready' &&
+            return record.state === 'Ready' && record.hypervisor !== 'External' &&
               (record.hypervisor !== 'KVM' ||
                ['Stopped', 'Destroyed'].includes(record.vmstate) ||
                store.features.kvmsnapshotenabled)
@@ -184,7 +184,7 @@ export default {
           label: 'label.action.recurring.snapshot',
           dataView: true,
           show: (record, store) => {
-            return record.state === 'Ready' &&
+            return record.state === 'Ready' && record.hypervisor !== 'External' &&
               (record.hypervisor !== 'KVM' ||
                (['Stopped', 'Destroyed'].includes(record.vmstate)) ||
                (store.features.kvmsnapshotenabled))
@@ -218,7 +218,7 @@ export default {
           label: 'label.migrate.volume',
           args: ['volumeid', 'storageid', 'livemigrate'],
           dataView: true,
-          show: (record, store) => { return record.state === 'Ready' },
+          show: (record, store) => { return record.state === 'Ready' && record.hypervisor !== 'External' },
           popup: true,
           component: shallowRef(defineAsyncComponent(() => import('@/views/storage/MigrateVolume.vue')))
         },
@@ -258,7 +258,7 @@ export default {
           label: 'label.action.download.volume',
           message: 'message.download.volume.confirm',
           dataView: true,
-          show: (record) => { return record.state === 'Ready' && (record.vmstate === 'Stopped' || !record.virtualmachineid) },
+          show: (record) => { return record.state === 'Ready' && record.hypervisor !== 'External' && (record.vmstate === 'Stopped' || !record.virtualmachineid) },
           args: ['zoneid', 'mode'],
           mapping: {
             zoneid: {
@@ -276,7 +276,7 @@ export default {
           label: 'label.action.create.template.from.volume',
           dataView: true,
           show: (record) => {
-            return record.state === 'Ready' && (record.vmstate === 'Stopped' || !record.virtualmachineid)
+            return record.state === 'Ready' && record.hypervisor !== 'External' && (record.vmstate === 'Stopped' || !record.virtualmachineid)
           },
           popup: true,
           component: shallowRef(defineAsyncComponent(() => import('@/views/storage/CreateTemplate.vue')))
@@ -310,15 +310,15 @@ export default {
           api: 'destroyVolume',
           icon: 'delete-outlined',
           label: 'label.action.destroy.volume',
-          message: 'message.action.destroy.volume',
+          message: (record) => { return record.virtualmachineid ? 'message.action.destroy.external.volume' : 'message.action.destroy.volume' },
           dataView: true,
           args: (record, store) => {
-            return (['Admin'].includes(store.userInfo.roletype) || store.features.allowuserexpungerecovervolume)
+            return !record.virtualmachineid && (['Admin'].includes(store.userInfo.roletype) || store.features.allowuserexpungerecovervolume)
               ? ['expunge'] : []
           },
           show: (record, store) => {
             return !['Destroy', 'Destroyed', 'Expunging', 'Expunged', 'Migrating', 'Uploading', 'UploadError', 'Creating', 'Allocated', 'Uploaded'].includes(record.state) &&
-              record.type !== 'ROOT' && !record.virtualmachineid
+              record.type !== 'ROOT' && (!record.virtualmachineid || record.hypervisor === 'External')
           }
         }
       ]

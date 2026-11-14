@@ -237,6 +237,40 @@ public class ExternalVolumeSyncTest {
     }
 
     @Test
+    public void aDiskMovedToOtherStorageAtTheProviderIsTheSameVolume() {
+        StoragePoolVO hdd = mock(StoragePoolVO.class);
+        when(hdd.getId()).thenReturn(6L);
+        when(hdd.getPath()).thenReturn("hdd");
+        when(hdd.getStorageProviderName()).thenReturn("External");
+        when(hdd.getPoolType()).thenReturn(StoragePoolType.RBD);
+        when(sync.poolDao.listByDataCenterId(3L)).thenReturn(Arrays.asList(pool, hdd));
+        when(sync.poolDao.searchForStoragePoolTags(6L)).thenReturn(Collections.singletonList("hdd-tier"));
+        when(sync.inventory.reaches(eq(hdd), eq(7L), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(true);
+        DiskOfferingVO standardHdd = offering("Standard HDD", "hdd-tier");
+        when(standardHdd.getId()).thenReturn(61L);
+        when(sync.diskOfferingDao.listAllActiveAndNonComputeDiskOfferings()).thenReturn(Arrays.asList(offering, standardHdd));
+        VolumeVO root = recorded(70L, Volume.Type.ROOT, "ssd:vm-110-disk-0", 32 * GIB, 0L, 10L);
+        VolumeVO data = recorded(71L, Volume.Type.DATADISK, "ssd:vm-110-disk-1", 100 * GIB, 1L, 10L);
+        when(sync.volumeDao.findByInstance(10L)).thenReturn(Arrays.asList(root, data));
+        com.cloud.storage.VolumeDetailVO slot = mock(com.cloud.storage.VolumeDetailVO.class);
+        when(slot.getValue()).thenReturn("scsi1");
+        when(sync.volumeDetailsDao.findDetail(71L, ExternalVolumeSync.SLOT_DETAIL)).thenReturn(slot);
+        String moved = DATA_DISK.replace("\"ssd\"", "\"hdd\"").replace("vm-110-disk-1", "vm-110-disk-4");
+
+        List<ExternalVolumeSync.Change> changes = sync.sync(vm, 7L, snapshot(ROOT_DISK, moved), false, unresolved);
+
+        assertEquals(1, changes.size());
+        assertEquals("move", changes.get(0).getAction());
+        assertEquals("hdd:vm-110-disk-4", changes.get(0).getVolumeId());
+        assertTrue(unresolved.toString(), unresolved.isEmpty());
+        verify(data).setPoolId(6L);
+        verify(data).setPath("hdd:vm-110-disk-4");
+        verify(data).setDiskOfferingId(61L);
+        verify(sync.resourceLimits).updateVolumeResourceCountForDiskOfferingChange(40L, true, 100 * GIB, 100 * GIB, offering, standardHdd);
+        verify(sync.volumeManager, never()).importVolume(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     public void sizeChangeAtTheProviderUpdatesTheRecordAndTheCount() {
         VolumeVO volume = recorded(70L, Volume.Type.ROOT, "ssd:vm-110-disk-0", 20 * GIB, 0L, 10L);
         when(sync.volumeDao.findByInstance(10L)).thenReturn(Collections.singletonList(volume));

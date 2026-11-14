@@ -56,6 +56,11 @@ public interface ExtensionHelper {
     /** Online NIC changes require both the base NIC capability and this separate opt-in. */
     boolean isInstanceNicHotplugSupported(long extensionId);
 
+    String INSTANCE_STORAGE_SUPPORTED = "instancestoragesupported";
+
+    /** Whether this enabled orchestrator reports the disks of its instances and can add, grow, delete and move them. */
+    boolean isInstanceStorageSupported(long extensionId);
+
     /**
      * Network Guru of Network Extension
      */

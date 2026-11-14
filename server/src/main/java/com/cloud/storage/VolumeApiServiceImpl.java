@@ -162,6 +162,7 @@ import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.Status;
 import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.ExternalInstanceDisks;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.hypervisor.HypervisorCapabilitiesVO;
 import com.cloud.hypervisor.dao.HypervisorCapabilitiesDao;
@@ -302,6 +303,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     private VolumeDataStoreDao _volumeStoreDao;
     @Inject
     private VMInstanceDao _vmInstanceDao;
+    @Inject
+    private ExternalInstanceDisks externalInstanceDisks;
     @Inject
     private PrimaryDataStoreDao _storagePoolDao;
     @Inject
@@ -1240,6 +1243,13 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         /* Does the caller have authority to act on this volume? */
         _accountMgr.checkAccess(CallContext.current().getCallingAccount(), null, true, volume);
 
+        if (externalInstanceOf(volume) != null) {
+            if (newSize == null || cmd.getNewDiskOfferingId() != null || newMinIops != null || newMaxIops != null) {
+                throw new InvalidParameterValueException("A volume of an External hypervisor instance is resized by giving its new size only");
+            }
+            return _volsDao.findById(externalInstanceDisks.grow(volume, newSize << 30).getId());
+        }
+
         DiskOfferingVO diskOffering = _diskOfferingDao.findById(volume.getDiskOfferingId());
         DiskOfferingVO newDiskOffering = null;
 
@@ -1924,6 +1934,11 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     @Override
     @ActionEvent(eventType = EventTypes.EVENT_VOLUME_DESTROY, eventDescription = "destroying a volume")
     public Volume destroyVolume(long volumeId, Account caller, boolean expunge, boolean forceExpunge, Boolean enforceResourceLimitOnDisplayFalse) {
+        if (removeDiskOfExternalInstance(volumeId, caller)) {
+            // The disk is gone, so there is nothing a destroyed volume could be recovered to.
+            expunge = true;
+            forceExpunge = true;
+        }
         VolumeVO volume = retrieveAndValidateVolume(volumeId, caller);
 
         validateDestroyVolume(volume, caller, expunge, forceExpunge);
@@ -2212,6 +2227,14 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         DiskOfferingVO existingDiskOffering = _diskOfferingDao.findByIdIncludingRemoved(existingDiskOfferingId);
         DiskOfferingVO newDiskOffering = _diskOfferingDao.findById(newDiskOfferingId);
         Integer newHypervisorSnapshotReserve = null;
+
+        if (externalInstanceOf(volume) != null) {
+            if (newDiskOffering == null) {
+                throw new InvalidParameterValueException("No such disk offering");
+            }
+            _configMgr.checkDiskOfferingAccess(_accountMgr.getActiveAccountById(volume.getAccountId()), newDiskOffering, _dcDao.findById(volume.getDataCenterId()));
+            return externalInstanceDisks.changeOffering(volume, newDiskOffering, newSize == null ? null : newSize << 30, autoMigrateVolume);
+        }
 
         boolean volumeMigrateRequired = false;
         boolean volumeResizeRequired = false;
@@ -3017,7 +3040,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         HypervisorType volumeToAttachHyperType = _volsDao.getHypervisorType(volumeToAttach.getId());
 
         if (HypervisorType.External.equals(rootDiskHyperType)) {
-            throw new InvalidParameterValueException("Volume operations are not allowed for External hypervisor type");
+            // There is no detached disk to attach: the orchestrator creates the disk on the instance.
+            return externalInstanceDisks.add(vm, _volsDao.findById(volumeId));
         }
 
         checkNumberOfAttachedVolumes(deviceId, vm);
@@ -3751,8 +3775,12 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         }
 
         HypervisorType hypervisorType = _volsDao.getHypervisorType(volumeId);
-        if (HypervisorType.External.equals(hypervisorType)) {
-            throw new InvalidParameterValueException("Volume migration operation is not allowed for hypervisor type External");
+        if (HypervisorType.External.equals(hypervisorType) || externalInstanceOf(vol) != null) {
+            StoragePoolVO destination = _storagePoolDao.findById(storagePoolId);
+            if (destination == null) {
+                throw new InvalidParameterValueException("Failed to find the destination storage pool: " + storagePoolId);
+            }
+            return externalInstanceDisks.move(vol, destination);
         }
 
         boolean liveMigrateVolume = false;
@@ -4571,10 +4599,32 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
      * cannot be taken away from the instance or copied out of its storage from here.
      */
     protected void rejectVolumeOfExternalInstance(Volume volume) {
-        VMInstanceVO vm = volume.getInstanceId() == null ? null : _vmInstanceDao.findById(volume.getInstanceId());
-        if (vm != null && HypervisorType.External.equals(vm.getHypervisorType())) {
+        if (externalInstanceOf(volume) != null) {
             throw new InvalidParameterValueException("This operation is not supported for a volume of an External hypervisor instance");
         }
+    }
+
+    /** The External hypervisor instance a volume is attached to; null for any other volume. */
+    protected VMInstanceVO externalInstanceOf(Volume volume) {
+        VMInstanceVO vm = volume.getInstanceId() == null ? null : _vmInstanceDao.findById(volume.getInstanceId());
+        return vm != null && HypervisorType.External.equals(vm.getHypervisorType()) ? vm : null;
+    }
+
+    /**
+     * A data disk of an External hypervisor instance cannot be detached, so deleting its volume deletes the disk
+     * from the instance. The record is left detached and is deleted the usual way by the caller.
+     *
+     * @return whether the volume was such a disk
+     */
+    protected boolean removeDiskOfExternalInstance(long volumeId, Account caller) {
+        VolumeVO volume = _volsDao.findById(volumeId);
+        VMInstanceVO vm = volume == null || volume.getState() != Volume.State.Ready ? null : externalInstanceOf(volume);
+        if (vm == null) {
+            return false;
+        }
+        _accountMgr.checkAccess(caller, null, true, volume);
+        externalInstanceDisks.remove(vm, volume);
+        return true;
     }
 
     @Override

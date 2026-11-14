@@ -2293,6 +2293,14 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         return runInstanceAction(vm, GET_CONFIG_ACTION, Collections.emptyMap());
     }
 
+    @Override
+    public Answer changeInstanceDisk(VirtualMachine vm, String action, Map<String, Object> parameters) {
+        if (!DISK_ACTIONS.contains(action)) {
+            return new Answer(null, false, "Unknown disk action");
+        }
+        return runInstanceAction(vm, action, parameters);
+    }
+
     protected Answer runInstanceAction(VirtualMachine vm, String action, Map<String, Object> parameters) {
         Pair<Long, Long> clusterAndHostId = virtualMachineManager.findClusterAndHostIdForVm(vm, false);
         Host host = clusterAndHostId.second() == null ? null : hostDao.findById(clusterAndHostId.second());
@@ -2304,6 +2312,12 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             Extension extension = getExtensionForCluster(host.getClusterId());
             if (extension == null || !isInstanceScaleSupported(extension.getId())) {
                 return new Answer(null, false, "The instance's extension does not support scaling.");
+            }
+        }
+        if (DISK_ACTIONS.contains(action)) {
+            Extension extension = getExtensionForCluster(host.getClusterId());
+            if (extension == null || !isInstanceStorageSupported(extension.getId())) {
+                return new Answer(null, false, "The instance's extension does not support storage.");
             }
         }
         if (GET_CONFIG_ACTION.equals(action)) {
@@ -2321,7 +2335,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         cmd.setVmTO(virtualMachineTO);
         cmd.setParameters(parameters);
         cmd.setExternalDetails(getExternalAccessDetails(host, virtualMachineTO.getExternalDetails()));
-        cmd.setWait(AgentManager.Wait.value());
+        cmd.setWait("movedisk".equals(action) ? Math.max(AgentManager.Wait.value(), DISK_MOVE_WAIT_SECONDS) : AgentManager.Wait.value());
         return agentMgr.easySend(host.getId(), cmd);
     }
 
@@ -2384,6 +2398,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             return false;
         }
         ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_NIC_CHANGE_SUPPORTED);
+        return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
+    }
+
+    @Override
+    public boolean isInstanceStorageSupported(long extensionId) {
+        Extension extension = getExtension(extensionId);
+        if (extension == null || extension.getType() != Extension.Type.Orchestrator
+                || extension.getState() != Extension.State.Enabled) {
+            return false;
+        }
+        ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_STORAGE_SUPPORTED);
         return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
     }
 

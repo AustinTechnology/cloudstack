@@ -258,6 +258,12 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
             }
         }
 
+        // A disk of an External instance says so to every caller: what can be done with such a volume differs.
+        StoragePoolVO externalPool = primaryDataStoreDao.findById(volume.getPoolId());
+        if (externalPool != null && externalPool.getHypervisor() == Hypervisor.HypervisorType.External) {
+            volResponse.setHypervisor(Hypervisor.HypervisorType.External.getHypervisorDisplayName());
+        }
+
         volResponse.setAttached(volume.getAttached());
         volResponse.setDestroyed(volume.getState() == Volume.State.Destroy);
         boolean isExtractable = true;

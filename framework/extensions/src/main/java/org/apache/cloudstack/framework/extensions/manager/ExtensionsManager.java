@@ -121,4 +121,16 @@ public interface ExtensionsManager extends Manager {
     Answer getInstanceConfig(VirtualMachine vm);
 
     String GET_CONFIG_ACTION = "getconfig";
+
+    /**
+     * Asks the orchestrator extension of an External instance to change one of its disks. The action is one of
+     * {@link #DISK_ACTIONS}; the parameters are "device", "volume", "storage" and "sizegb" as the action needs them.
+     * The extension must declare {@link org.apache.cloudstack.extension.ExtensionHelper#INSTANCE_STORAGE_SUPPORTED}.
+     */
+    Answer changeInstanceDisk(VirtualMachine vm, String action, java.util.Map<String, Object> parameters);
+
+    java.util.List<String> DISK_ACTIONS = java.util.Arrays.asList("adddisk", "resizedisk", "deletedisk", "movedisk");
+
+    /** A disk move copies the disk, so it is given longer than other actions: as long as any action may take. */
+    int DISK_MOVE_WAIT_SECONDS = 6900;
 }

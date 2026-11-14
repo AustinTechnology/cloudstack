@@ -539,6 +539,8 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
             userVmResponse.setInstanceScaleSupported(isInstanceScaleSupported(userVm));
             userVmResponse.setInstanceNicChangeSupported(isInstanceNicChangeSupported(userVm));
             userVmResponse.setInstanceNicHotplugSupported(isInstanceNicHotplugSupported(userVm));
+            Long extensionId = getInstanceExtensionId(userVm);
+            userVmResponse.setInstanceStorageSupported(extensionId != null && extensionHelper.isInstanceStorageSupported(extensionId));
         }
 
         if (userVm.isDeleteProtection() == null) {

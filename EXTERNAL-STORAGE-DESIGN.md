@@ -89,7 +89,7 @@ On the Java side: a storage provider and driver in the External plugin, volume m
 Each phase is usable alone.
 
 1. **See.** Pools registered; the refresh, the periodic worker and `adoptExternalInstance` import and update volumes. Disks show in the UI and API with size and storage. No Proxmox writes. A VM deployed through CloudStack gets its volume records at its next refresh. **Built and tested in the lab; see below.**
-2. **Change attached disks.** Add a data disk, grow a disk, delete a data disk, move a disk between storages.
+2. **Change attached disks.** Add a data disk, grow a disk, delete a data disk, move a disk between storages. **Built and tested in the lab; see below.**
 3. **Whole-VM snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the four custom actions.
 4. **Per-disk snapshots on Ceph.** To be investigated before it is designed; see the section below.
 
@@ -174,9 +174,69 @@ Verified in the lab (`storage-v8`, 736 unit tests and 45 extension tests passing
 
 Not tested: two Proxmox clusters sharing one pool (the lab has one cluster; the sharing rules are covered by unit tests only, and production's own storage definitions were read and satisfy them), Ceph (the lab storage is NFS), a guest with an EFI or TPM disk, a disk on an unregistered storage alongside registered ones on a real guest, and anything at production scale.
 
+## Phase 2 as built (14 Nov 2026, lab only)
+
+Lab build `storage-p2g`. Not installed in production and not pushed.
+
+Every change is made at Proxmox first and recorded only when Proxmox shows the result that was asked for. The ordinary volume API is used; there are no new API calls.
+
+| To | Call | What happens |
+|---|---|---|
+| Add a data disk | `createVolume` with a tier's offering and a size, then `attachVolume` | A new disk of that size is created on the tier's storage, in the next free slot on the bus of the boot disk (SATA when the boot disk is IDE), with the boot disk's discard, SSD and iothread settings. |
+| Grow a disk | `resizeVolume` with the new size | Root or data disk. Whole GiB, larger only. |
+| Delete a data disk | `deleteVolume` or `destroyVolume` on the attached volume | The disk leaves the guest and its image is deleted in one Proxmox task. The volume is expunged at once: there is nothing to recover. The root disk is refused. |
+| Move a disk | `changeOfferingForVolume` to another tier's offering with `automigrate=true` (owner), or `migrateVolume` to the pool (admin) | Proxmox copies the disk to the other storage and deletes the source. The volume takes the destination tier's offering. Without `automigrate` a change of tier is refused. |
+
+Rules:
+
+- **Running guests.** Add and delete work on a running guest only on a SCSI or VirtIO slot with disk hotplug on. Anything else would leave a pending change, so it is refused with "stop the instance". Grow and move work running or stopped.
+- **Identity.** A change names the slot and the exact Proxmox volume ID recorded for the volume. The extension refuses if that slot does not hold that volume. Delete names one volume; nothing is ever found by VMID or by scanning storage.
+- **Before any write** the extension refuses a template, a locked guest, a guest with pending changes and an unstable power state, and sends the configuration digest with the write so Proxmox refuses it if the guest changed in between.
+- **One change at a time.** A disk change and a refresh of the same instance exclude each other on every management server (a database lock named for the instance). A disk change waits 30 seconds for the other to finish, a refresh 1 second, then each is refused with "in progress". The lock holds one database connection for as long as the change runs.
+- **Adopted guests** also take an operation lease, as for every other change. A failure Proxmox reported releases it; an unknown outcome keeps it for the operator.
+- **Unknown outcome.** Nothing is recorded. The next refresh records what Proxmox has: a new size, or a disk now on other storage (same slot, different storage is recorded as a move of the same volume, with its offering).
+- **Limits.** An added disk is counted when its volume is created, the stock way, so an account at its limit is refused there. A grow is checked against the limit. A move is never checked, so an account over its limit after the import can still move a disk.
+- **Wait.** A move is given 6900 seconds, the longest any action may take. A disk that needs longer is moved in Proxmox itself and the next refresh records it.
+- **Still refused:** detach, download, snapshot, snapshot schedule, shrink, and attaching a volume that already has a disk.
+
+The capability `instancestoragesupported` on the extension covers phases 1 and 2. The instance response now carries it, and a volume on External storage reports `hypervisor: External` to every caller, which is what the UI goes by.
+
+UI: "Create and attach volume" on the instance's Volumes tab works for an External instance whose extension has the capability. On such a volume, detach, snapshot, recurring snapshot, download, create template and migrate are hidden; delete is offered for an attached data disk with its own warning; Change Offering lists only the other tiers.
+
+Proxmox privileges the extension's role needs for this phase: `VM.Config.Disk`, `Datastore.AllocateSpace`, `Datastore.Audit`. The lab role has them, and so does production's role on both clusters (read 14 Nov 2026).
+
+Verified in the lab (745 unit tests, 53 extension tests), on two NFS storages with a tier each:
+
+- Adopted running guest: add, grow twice, shrink refused, move to the other storage, tier changed back with a grow, delete. The guest's QEMU process was the same throughout; the images appeared and disappeared on the right storage; counts and usage records followed each step.
+- Root disk of a running adopted guest grown; root delete refused.
+- Guest CloudStack deployed, running: add on the second tier, delete. Stopped guest: add, grow, delete. Guest in Proxmox HA: add, delete, HA state unchanged.
+- A locked guest: grow refused before any write, lease released, record unchanged.
+- An offering with no tier: attach refused. An account over its limits: add and grow refused, move allowed.
+- As the owning ordinary user: the tiers listed for a disk, a tier change refused without `automigrate` and done with it, `migrateVolume` not available.
+- A disk moved in Proxmox behind CloudStack: the refresh recorded the move and the new offering once, and nothing on repeat.
+- A 111 second move: a grow and a refresh sent during it were both refused, and counts were unchanged by the move.
+- Detach, snapshot, snapshot schedule, download and shrink still refused, with no row changed.
+- After all of it: no drift on any guest, no lease, no fence, no leftover image or unused disk.
+
+Not tested:
+
+- **Ceph.** Both lab storages are NFS. Add, grow, delete and move on RBD, and on erasure-coded pools, have not run anywhere.
+- **Two Proxmox clusters on one pool.** The lab has one cluster.
+- An unknown outcome on a real guest. The lease and recording rules for it are covered by the extension's tests against a fake Proxmox, not live.
+- A move that outlasts the wait.
+- SATA, IDE and VirtIO slots on a real guest (extension tests only); a guest with EFI or TPM disks; Windows.
+- The UI by hand. The button rules were checked from the source and the built UI is installed in the lab, but nobody has clicked through it.
+- A management server restart in the middle of a change.
+
+Known gaps:
+
+- When an attach is refused (wrong offering, no free slot), the volume that was just created stays behind unattached, as with any failed attach. It is only a record and can be deleted.
+- A guest deployed through CloudStack still gets its root volume record at its first refresh, not at deploy.
+- The stock resize form asks for IOPS when the first disk offering in the zone has custom IOPS. A resize that carries IOPS is refused for these volumes.
+
 ## Risks
 
-- **Core changes to carry.** Lifting the refusals touches `VolumeApiServiceImpl` and `VMSnapshotManagerImpl`, and the pool may need a new pool type. Each is another patch to re-apply on upgrade until upstream takes it.
+- **Core changes to carry.** Phases 1 and 2 touch `VolumeApiServiceImpl`, `SnapshotManagerImpl`, `UserVmManagerImpl`, `VolumeOrchestrator`, `QueryManagerImpl`, `VolumeJoinDaoImpl`, `UserVmJoinDaoImpl` and three UI files. Phase 3 will add `VMSnapshotManagerImpl`. Each is another patch to re-apply on upgrade until upstream takes it.
 - **Billing starts at import.** Phase 1 creates usage records and raises account storage totals for over 100 TiB that CloudStack has never counted.
 - **Shared Ceph pools.** A wrong delete can reach another cluster's guest. The identity rule and the explicit "no unreferenced cleanup" are the controls; the lab cannot reproduce two clusters on one pool as it stands.
 - **The lab has no Ceph.** Its storages are NFS and a local directory. RBD behaviour (erasure-coded data pools, move between pools) would first be exercised in production unless the lab gets a Ceph pool.

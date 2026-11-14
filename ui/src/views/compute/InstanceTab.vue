@@ -44,7 +44,7 @@
           style="width: 100%; margin-bottom: 10px"
           @click="showAddVolModal"
           :loading="loading"
-          :disabled="!('createVolume' in $store.getters.apis) || this.vm.state === 'Error' || resource.hypervisor === 'External'">
+          :disabled="!('createVolume' in $store.getters.apis) || this.vm.state === 'Error' || (resource.hypervisor === 'External' && resource.instancestoragesupported !== true)">
           <template #icon><plus-outlined /></template> {{ $t('label.action.create.volume.add') }}
         </a-button>
         <volumes-tab :resource="vm" :loading="loading" />

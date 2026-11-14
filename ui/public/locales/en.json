@@ -3143,6 +3143,7 @@
 "message.action.destroy.instance": "Please confirm that you want to destroy the Instance.",
 "message.action.destroy.instance.with.backups": "Please confirm that you want to destroy the Instance. There may be backups associated with the Instance which will not be deleted.",
 "message.action.destroy.systemvm": "Please confirm that you want to destroy the System VM.",
+"message.action.destroy.external.volume": "Please confirm that you want to delete this disk from the Instance. The disk and its data are deleted at once and cannot be recovered.",
 "message.action.destroy.volume": "Please confirm that you want to destroy the volume.",
 "message.action.disable.2FA.user.auth": "Please confirm that you want to disable User two factor authentication.",
 "message.action.about.mandate.and.disable.2FA.user.auth": "Two factor authentication is mandated for the User, if this is disabled now User will need to setup two factor authentication again during next login. <br><br>Please confirm that you want to disable.",

@@ -88,6 +88,7 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
     @Inject NetworkOrchestrationService networkOrchestrator;
     @Inject DataCenterDao dataCenterDao;
     @Inject ExternalVolumeSync volumeSync;
+    @Inject org.apache.cloudstack.hypervisor.external.storage.ExternalInstanceLock instanceLock;
 
     @Override public List<Class<?>> getCommands() { return List.of(RefreshExternalVirtualMachineCmd.class); }
 
@@ -181,6 +182,11 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         VMInstanceVO vm = vmId == null ? null : vmDao.findById(vmId);
         if (vm == null) throw new InvalidParameterValueException("Instance not found");
         accountService.checkAccess(CallContext.current().getCallingAccount(), null, true, vm);
+        // Not while a disk of the instance is being changed: the change is at the provider before it is recorded.
+        return instanceLock.hold(vmId, 1, () -> refreshLocked(vm, vmId, dryRun));
+    }
+
+    private ExternalVmRefreshResponse refreshLocked(VMInstanceVO vm, Long vmId, boolean dryRun) {
         Binding before = binding(vm);
         ExternalVmConfiguration initial = fetch(vm, before);
         ExternalNativeNicRefresh nicRefresh = new ExternalNativeNicRefresh(nicDao, networkDao, observationBindingResolver, observationService);

@@ -146,6 +146,12 @@ public class ExternalVolumeSync {
         disks.sort((a, b) -> Boolean.compare(b.root, a.root));
         List<Change> changes = new ArrayList<>();
         Set<Long> seen = new HashSet<>();
+        Set<String> configured = new HashSet<>();
+        for (ExternalVmConfiguration.Disk disk : disks) {
+            if (disk.volumeId() != null) {
+                configured.add(disk.volumeId());
+            }
+        }
         for (ExternalVmConfiguration.Disk disk : disks) {
             String id = disk.volumeId();
             if (id == null) {
@@ -186,6 +192,23 @@ public class ExternalVolumeSync {
                 DiskOfferingVO offering = offering(pool);
                 if (offering == null) {
                     unresolved.add("storage " + disk.storage + " has no single custom disk offering tagged for it; disk " + disk.device + " not recorded");
+                    continue;
+                }
+                // A disk moved to other storage at the provider is the same volume: same slot, same size, and
+                // the disk it was is no longer in the configuration.
+                VolumeVO movedFrom = null;
+                for (VolumeVO candidate : recorded) {
+                    if (!seen.contains(candidate.getId()) && !configured.contains(candidate.getPath()) && disk.device.equals(slot(candidate.getId()))
+                            && Objects.equals(candidate.getSize(), disk.sizeBytes)) {
+                        movedFrom = candidate;
+                    }
+                }
+                if (movedFrom != null) {
+                    seen.add(movedFrom.getId());
+                    changes.add(new Change(disk.device, id, "move", movedFrom.getVolumeType().toString(), disk.sizeBytes, disk.sizeBytes, offering.getName(), !dryRun));
+                    if (!dryRun) {
+                        moved(movedFrom, pool, offering, id);
+                    }
                     continue;
                 }
                 boolean root = disk.root && !hasRoot;
@@ -280,7 +303,7 @@ public class ExternalVolumeSync {
         resourceLimits.incrementVolumeResourceCount(volume.getAccountId(), volume.isDisplayVolume(), volume.getSize(), offering);
     }
 
-    private void resize(VolumeVO volume, long size) {
+    void resize(VolumeVO volume, long size) {
         long previous = volume.getSize() == null ? 0 : volume.getSize();
         DiskOfferingVO offering = diskOfferingDao.findByIdIncludingRemoved(volume.getDiskOfferingId());
         volume.setSize(size);
@@ -296,6 +319,72 @@ public class ExternalVolumeSync {
     protected void publish(String eventType, VolumeVO volume, long size) {
         UsageEventUtils.publishUsageEvent(eventType, volume.getAccountId(), volume.getDataCenterId(), volume.getId(), volume.getName(),
                 volume.getDiskOfferingId(), volume.getTemplateId(), size, Volume.class.getName(), volume.getUuid(), volume.isDisplayVolume());
+    }
+
+    /** The provider slot recorded for a volume; null when none is. */
+    String slot(long volumeId) {
+        VolumeDetailVO detail = volumeDetailsDao.findDetail(volumeId, SLOT_DETAIL);
+        return detail == null ? null : detail.getValue();
+    }
+
+    /** The External pool of a zone that a disk offering is for: the one Up pool that carries all its tags. */
+    StoragePoolVO pool(long zoneId, DiskOfferingVO offering) {
+        if (offering == null || !offering.isCustomized() || offering.getTags() == null || offering.getTags().trim().isEmpty()) {
+            return null;
+        }
+        StoragePoolVO match = null;
+        for (StoragePoolVO pool : poolDao.listByDataCenterId(zoneId)) {
+            List<String> tags = ExternalPrimaryDataStoreProvider.NAME.equals(pool.getStorageProviderName()) && pool.getRemoved() == null
+                    && pool.getStatus() == com.cloud.storage.StoragePoolStatus.Up ? poolDao.searchForStoragePoolTags(pool.getId()) : null;
+            if (tags == null || !tags.containsAll(Arrays.asList(offering.getTagsArray()))) {
+                continue;
+            }
+            if (match != null) {
+                return null;
+            }
+            match = pool;
+        }
+        return match;
+    }
+
+    /** Records a data volume that has just been created on an instance. It was counted when it was allocated. */
+    void attached(VolumeVO volume, VMInstanceVO vm, StoragePoolVO pool, String path, String device) {
+        Set<Long> used = new HashSet<>();
+        for (VolumeVO other : volumeDao.findByInstance(vm.getId())) {
+            if (live(other) && other.getDeviceId() != null) {
+                used.add(other.getDeviceId());
+            }
+        }
+        long deviceId = 1;
+        while (used.contains(deviceId)) {
+            deviceId++;
+        }
+        volume.setPoolId(pool.getId());
+        volume.setPoolType(pool.getPoolType());
+        volume.setPath(path);
+        volume.setState(Volume.State.Ready);
+        volumeDao.update(volume.getId(), volume);
+        volumeDao.attachVolume(volume.getId(), vm.getId(), deviceId);
+        saveSlot(volume.getId(), device);
+    }
+
+    /** Records that a volume's disk is now on other storage. Its offering, counts and usage follow the storage. */
+    void moved(VolumeVO volume, StoragePoolVO pool, DiskOfferingVO offering, String path) {
+        DiskOfferingVO previous = diskOfferingDao.findByIdIncludingRemoved(volume.getDiskOfferingId());
+        volume.setPoolId(pool.getId());
+        volume.setPoolType(pool.getPoolType());
+        volume.setPath(path);
+        volume.setDiskOfferingId(offering.getId());
+        volumeDao.update(volume.getId(), volume);
+        if (previous == null || previous.getId() != offering.getId()) {
+            resourceLimits.updateVolumeResourceCountForDiskOfferingChange(volume.getAccountId(), volume.isDisplayVolume(), volume.getSize(), volume.getSize(), previous, offering);
+            publish(EventTypes.EVENT_VOLUME_RESIZE, volume, volume.getSize());
+        }
+    }
+
+    void detached(VolumeVO volume) {
+        volumeDao.detachVolume(volume.getId());
+        volumeDetailsDao.removeDetail(volume.getId(), SLOT_DETAIL);
     }
 
     private void saveSlot(long volumeId, String device) {

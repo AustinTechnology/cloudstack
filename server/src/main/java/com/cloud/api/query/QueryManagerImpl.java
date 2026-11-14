@@ -390,6 +390,9 @@ public class QueryManagerImpl extends MutualExclusiveIdsManagerBase implements Q
     AccountManager accountMgr;
 
     @Inject
+    private com.cloud.hypervisor.ExternalInstanceDisks externalInstanceDisks;
+
+    @Inject
     RoleService roleService;
 
     @Inject
@@ -3821,6 +3824,14 @@ public class QueryManagerImpl extends MutualExclusiveIdsManagerBase implements Q
 
         List<DiskOfferingJoinVO> diskOfferings = _diskOfferingJoinDao.searchByIds(idArray);
 
+        Volume externalInstanceDisk = cmd.getVolumeId() == null ? null : volumeDao.findById(cmd.getVolumeId());
+        if (onExternalInstance(externalInstanceDisk)) {
+            // Only the offerings of External storage: the disk can have no other.
+            int listed = diskOfferings.size();
+            diskOfferings.removeIf(offering -> !externalInstanceDisks.offered(externalInstanceDisk, offering.getId()));
+            count -= listed - diskOfferings.size();
+        }
+
         if (requiredTagsArray.length != 0) {
             ListIterator<DiskOfferingJoinVO> iteratorForTagsChecking = diskOfferings.listIterator();
             while (iteratorForTagsChecking.hasNext()) {
@@ -4058,7 +4069,10 @@ public class QueryManagerImpl extends MutualExclusiveIdsManagerBase implements Q
         Pair<List<DiskOfferingVO>, Integer> uniquePairs = _diskOfferingDao.searchAndCount(sc, searchFilter);
         String[] requiredTagsArray = new String[0];
         if (CollectionUtils.isNotEmpty(uniquePairs.first()) && VolumeApiServiceImpl.MatchStoragePoolTagsWithDiskOffering.valueIn(zoneId)) {
-            if (volumeId != null) {
+            if (onExternalInstance(volume)) {
+                // The disk changes storage by changing its offering, so it is not held to the tags of the one it has.
+                requiredTagsArray = new String[0];
+            } else if (volumeId != null) {
                 requiredTagsArray = currentDiskOffering.getTagsArray();
             } else if (storagePoolId != null) {
                 requiredTagsArray = _storageTagDao.getStoragePoolTags(storagePoolId).toArray(new String[0]);
@@ -4067,6 +4081,11 @@ public class QueryManagerImpl extends MutualExclusiveIdsManagerBase implements Q
         List<Long> idsArray = uniquePairs.first().stream().map(DiskOfferingVO::getId).collect(Collectors.toList());
 
         return new Ternary<>(idsArray, uniquePairs.second(), requiredTagsArray);
+    }
+
+    private boolean onExternalInstance(Volume volume) {
+        VMInstanceVO vm = volume == null || volume.getInstanceId() == null ? null : _vmInstanceDao.findById(volume.getInstanceId());
+        return vm != null && HypervisorType.External.equals(vm.getHypervisorType());
     }
 
     private void useStorageType(SearchCriteria<?> sc, String storageType) {
