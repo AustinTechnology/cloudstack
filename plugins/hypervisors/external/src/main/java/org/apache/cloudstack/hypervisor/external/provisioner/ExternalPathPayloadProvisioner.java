@@ -34,6 +34,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -579,25 +580,46 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         }
     }
 
-    /** The power sync sends a stop after the provider has already reported the instance off.
-     * Nothing has to change at the provider then, so no operation lease is taken. Without this
-     * a retained lease refuses that stop and CloudStack keeps showing a stopped instance as Running.
-     * The retained lease itself is untouched and still fences every lifecycle operation. */
-    protected boolean nativeAdoptedInstanceAlreadyOff(String hostGuid, String extensionName, String extensionPath, StopCommand cmd) {
-        Map<String, Map<String, String>> details = cmd.getExternalDetails();
-        if (!cmd.checkBeforeCleanup() || details == null || cmd.getVirtualMachine() == null) { return false; }
-        Map<String, String> host = details.get("host");
-        Map<String, String> vm = details.get(ApiConstants.VIRTUAL_MACHINE);
-        if (host == null || vm == null || !"true".equals(host.get(NATIVE_ADOPTION_LIFECYCLE))
-                || !"true".equals(host.get(NATIVE_ADOPTION_STATUS)) || !"true".equals(vm.get("adopt_existing"))) {
-            return false;
+    /** The power sync sends a stop with checkBeforeCleanup after a host reported the instance off,
+     * before it marks the instance Stopped. That stop never changes the provider: the instance may
+     * have been started again since the report. The power report is read again; off is acknowledged,
+     * running is refused so CloudStack keeps the instance Running, and anything else is refused as
+     * unconfirmed. No operation lease is taken, so a retained lease does not keep a stopped
+     * instance showing as Running, and it still fences every lifecycle operation. */
+    protected StopAnswer answerCleanupStop(String hostGuid, String extensionName, String extensionPath, StopCommand cmd) {
+        VirtualMachine.PowerState state = reportedPowerState(hostGuid, extensionName, extensionPath, cmd);
+        if (VirtualMachine.PowerState.PowerOff.equals(state)) {
+            return new StopAnswer(cmd, null, true);
         }
-        HostVO hostVO = hostDao.findByGuid(hostGuid);
-        if (hostVO == null) { return false; }
-        Map<String, HostVmStateReportEntry> states = getVmPowerStates(hostVO,
-                extensionsManager.getExternalAccessDetails(hostVO, null), extensionName, extensionPath);
-        HostVmStateReportEntry entry = states == null ? null : states.get(cmd.getVirtualMachine().getName());
-        return entry != null && VirtualMachine.PowerState.PowerOff.equals(entry.getState());
+        if (VirtualMachine.PowerState.PowerOn.equals(state)) {
+            return new StopAnswer(cmd, "vm is still running on host", false);
+        }
+        return new StopAnswer(cmd, "The power state of the instance could not be confirmed; nothing was stopped", false);
+    }
+
+    /** What the host's power report says now. An instance that was moved while off is no longer
+     * listed by the host CloudStack has it on, so the host that last reported it is read as well. */
+    protected VirtualMachine.PowerState reportedPowerState(String hostGuid, String extensionName, String extensionPath, StopCommand cmd) {
+        String name = cmd.getVmName();
+        if (StringUtils.isBlank(name) && cmd.getVirtualMachine() != null) { name = cmd.getVirtualMachine().getName(); }
+        HostVO host = hostDao.findByGuid(hostGuid);
+        if (StringUtils.isBlank(name) || host == null) { return VirtualMachine.PowerState.PowerUnknown; }
+        HostVmStateReportEntry entry = reportEntry(host, name, extensionName, extensionPath);
+        if (entry == null) {
+            VMInstanceVO instance = vmInstanceDao.findVMByInstanceName(name);
+            Long reporterId = instance == null ? null : instance.getPowerHostId();
+            HostVO reporter = reporterId == null || reporterId.equals(host.getId()) ? null : hostDao.findById(reporterId);
+            if (reporter != null && Objects.equals(reporter.getClusterId(), host.getClusterId())) {
+                entry = reportEntry(reporter, name, extensionName, extensionPath);
+            }
+        }
+        return entry == null ? VirtualMachine.PowerState.PowerUnknown : entry.getState();
+    }
+
+    private HostVmStateReportEntry reportEntry(HostVO host, String name, String extensionName, String extensionPath) {
+        Map<String, HostVmStateReportEntry> states = getVmPowerStates(host,
+                extensionsManager.getExternalAccessDetails(host, null), extensionName, extensionPath);
+        return states == null ? null : states.get(name);
     }
 
     @Override
@@ -608,8 +630,8 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             return new StopAnswer(cmd, getExtensionConfigureError(extensionName, hostName), false);
         }
         logger.debug("Executing stop command on the external provisioner");
-        if (nativeAdoptedInstanceAlreadyOff(hostName, extensionName, extensionPath, cmd)) {
-            return new StopAnswer(cmd, null, true);
+        if (cmd.checkBeforeCleanup()) {
+            return answerCleanupStop(hostName, extensionName, extensionPath, cmd);
         }
         VirtualMachineTO virtualMachineTO = cmd.getVirtualMachine();
         String vmUUID = cmd.getVirtualMachine().getUuid();
