@@ -176,6 +176,14 @@ Before production:
 - **Role.** Add `Sys.Console` to the production `CloudStackExtension` role first. Without it a start that needs to change HA fails. Review what else that privilege allows before granting it.
 - **Jar first, flag second.** With the old jar, an External VM with the flag on makes CloudStack compete with Proxmox HA.
 
+**Found in production, 14 Nov 2026: CloudStack hard-stops guests after an out-of-band stop.** Not fixed in the lab code yet.
+
+- When a host reports a VM off that CloudStack has as Running, `VirtualMachineManagerImpl.handlePowerOffReportWithNoPendingJobsOnVM` sends a `StopCommand` with `checkBeforeCleanup=true` before it marks the VM Stopped. This path does not depend on the HA flag.
+- KVM answers that command without stopping a guest that is running (`LibvirtStopCommandWrapper`). The External plugin ignores the flag and the script issues a real Proxmox stop.
+- If the guest was started again before the command arrives, it is powered off. Evidence and counts: the operator notes.
+- The lab code acknowledges the command without a provider call only for an adopted guest that is already off; a guest that is running again is still stopped, and non-adopted guests always are.
+- Fix to make: a `checkBeforeCleanup` stop never changes the provider. Read the power state; off answers success, running answers failure so CloudStack leaves the VM Running.
+
 ### Step 5: scale VM (done in the lab, 12 Nov 2026)
 
 Files: `UserVmManagerImpl.java`, `ExtensionsManager.java`, `ExtensionsManagerImpl.java`, the script.
@@ -275,11 +283,13 @@ Validation: real lab reads, native dry-run/apply with observed CPU/RAM/IP change
 
 Source dependency inventory: the operator notes. It is source-only, not a live registry snapshot. Stopped-source adoption remains unsupported unless deliberately implemented; parity does not require starting a stopped guest merely to import it.
 
-### Step 8: disks (needs a design decision first)
+### Step 8: disks (decided 14 Nov 2026: model them in CloudStack; design not started)
+
+**Decision:** disks of External VMs are to be visible and manageable in CloudStack. The extension framework has no storage support today, so this needs framework work, not only lifted refusals. A design comes first.
 
 CloudStack has no volume records for External VMs. Volume attach, detach, resize, migrate and snapshot all depend on that model, so lifting the refusals alone would not work.
 
-Decide first whether External VM disks should become CloudStack volumes at all. Until then, Proxmox snapshots stay available through the existing custom actions and disk changes are made in Proxmox.
+Until it is built, Proxmox snapshots stay available through the existing custom actions and disk changes are made in Proxmox.
 
 ### Step 9: upstream
 
@@ -299,11 +309,13 @@ Decide first whether External VM disks should become CloudStack volumes at all. 
 
 ## Open questions
 
-1. Should External VM disks be modelled as CloudStack volumes (step 8)?
-2. Which Proxmox privilege does managing HA resources need, and is it acceptable on the extension's token?
+None recorded. Step 8 needs a design.
 
 ## Decided
 
 - Plan approved 11 Nov 2026. Trials run on the non-production CloudStack built on HV08 on 12 Nov 2026.
 - HA follows the model above.
 - The fork is public because GitHub forks of public repositories are public.
+- 14 Nov 2026: External VM disks are to be visible and manageable in CloudStack (step 8).
+- 14 Nov 2026: `Sys.Console` on the extension's Proxmox token, needed to manage HA resources, is acceptable.
+- 14 Nov 2026: Proxmox HA membership is authoritative. Every VM in Proxmox HA gets the CloudStack HA flag on; every VM outside it gets the flag off. The flags are set only after the step 4 jar is running (see "Jar first, flag second").
