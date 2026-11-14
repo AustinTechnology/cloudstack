@@ -88,7 +88,7 @@ On the Java side: a storage provider and driver in the External plugin, volume m
 
 Each phase is usable alone.
 
-1. **See.** Pools registered; the refresh, the periodic worker and `adoptExternalInstance` import and update volumes. Disks show in the UI and API with size and storage. No Proxmox writes. New VMs deployed through CloudStack get a root volume record.
+1. **See.** Pools registered; the refresh, the periodic worker and `adoptExternalInstance` import and update volumes. Disks show in the UI and API with size and storage. No Proxmox writes. A VM deployed through CloudStack gets its volume records at its next refresh. **Built and tested in the lab; see below.**
 2. **Change attached disks.** Add a data disk, grow a disk, delete a data disk, move a disk between storages.
 3. **Whole-VM snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the four custom actions.
 4. **Per-disk snapshots on Ceph.** To be investigated before it is designed; see the section below.
@@ -143,6 +143,32 @@ Two ways it could be wired, neither traced in the code yet:
 Either way CloudStack must refuse or clean up when a disk with snapshots is moved or deleted, because Proxmox will remove them.
 
 The lab has neither Ceph nor a KVM host, so this cannot be tried there as it stands.
+
+## Phase 1 as built (14 Nov 2026, lab only)
+
+Setting up a cluster:
+
+1. Declare `instancestoragesupported=true` on the extension. Without it nothing below is accepted.
+2. Register each storage: `createStoragePool` with `provider=External`, `scope=cluster`, `hypervisor=External`, `url=external://<Proxmox storage name>` and a tag. The storage must exist on the cluster, be enabled and active, hold guest disks, and be shared; node-local storage is refused. The same storage on two clusters is two pools.
+3. Create one custom-size disk offering carrying the same tag. A storage whose tag matches no offering, or more than one, has its disks reported and not recorded.
+
+The tag of an External pool must not be on any KVM pool. A volume created loose from a tier's offering is only a record until phase 2 gives it somewhere to go, and a shared tag would let CloudStack place it on KVM storage.
+
+What a refresh or adoption then does, for each disk in the guest's configuration:
+
+- A disk on a registered storage with an offering becomes a volume: the boot disk is the root volume, the others data disks. Its identity is the pool and the Proxmox volume ID (`<storage>:<volume>`). It is found by that ID in the guest's own configuration, never by scanning the storage or matching a VMID in an image name.
+- A size change at Proxmox updates the volume, the account's total and writes a resize usage record.
+- A volume whose disk is no longer in the configuration is reported and left alone.
+- Limits never stop a disk being recorded. An account that lands over a limit is named in the response, in the dry run too.
+- The dry run of both calls lists exactly what would be recorded and writes nothing.
+
+Removing the instance removes its volume records, counts and usage with it. An adopted guest and its disks stay at Proxmox; a guest CloudStack deployed is destroyed with its disks, as before.
+
+The ordinary volume API on these volumes: detach, extract, snapshot and snapshot schedule are refused before anything is recorded; resize, migrate, delete, attach elsewhere and reinstall were already refused. Making a template from the root disk of a stopped guest fails at the host and leaves nothing behind.
+
+Verified in the lab (`storage-v5`, 733 unit tests and 45 extension tests passing): registration and its three refusals; dry run, import, repeat with no change; a disk grown at Proxmox, running and stopped; an adopted guest expunged with both disks kept at Proxmox and re-adopted into an account limited to one volume and 1 GiB, which recorded two volumes and 5 GiB and said so; a deployed guest imported then destroyed with its disk; destroy and recover; stop, start and reboot of guests with volumes; the periodic worker importing the guests not yet done, once; capacity and used bytes following Proxmox every minute.
+
+Not tested: Ceph (the lab storage is NFS), a guest with an EFI or TPM disk, a disk on an unregistered storage alongside registered ones on a real guest, and anything at production scale.
 
 ## Risks
 

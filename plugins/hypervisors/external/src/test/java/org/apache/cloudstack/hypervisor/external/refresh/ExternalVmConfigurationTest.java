@@ -18,6 +18,7 @@ package org.apache.cloudstack.hypervisor.external.refresh;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -155,5 +156,45 @@ public class ExternalVmConfigurationTest {
             assertTrue(diff.ipCandidates.isEmpty());
             assertEquals(1, diff.unresolved.size());
         }
+    }
+
+    private static String withDisks(String disks) {
+        return SNAPSHOT.replace("\"disks\":[{\"device\":\"scsi0\",\"size\":\"5G\"}]", "\"disks\":[" + disks + "]");
+    }
+
+    @Test
+    public void diskFromAnExtensionWithoutDiskDetailsHasNoVolumeIdentity() {
+        ExternalVmConfiguration.Disk disk = ExternalVmConfiguration.parse(SNAPSHOT).diskList.get(0);
+        assertEquals("scsi0", disk.device);
+        assertNull(disk.volumeId());
+        assertNull(disk.sizeBytes);
+        assertFalse(disk.root);
+    }
+
+    @Test
+    public void disksCarryStorageVolumeSizeAndRoot() {
+        ExternalVmConfiguration snapshot = ExternalVmConfiguration.parse(withDisks(
+                "{\"device\":\"scsi0\",\"storage\":\"ssd.ec22\",\"volume\":\"vm-110-disk-0\",\"size_bytes\":34359738368,\"root\":true},"
+                + "{\"device\":\"virtio1\",\"storage\":\"nfs\",\"volume\":\"110/vm-110-disk-1.qcow2\",\"size_bytes\":1073741824,\"root\":false},"
+                + "{\"device\":\"sata0\",\"storage\":null,\"volume\":null,\"size_bytes\":null,\"root\":false}"));
+        assertEquals(3, snapshot.diskList.size());
+        assertEquals("ssd.ec22:vm-110-disk-0", snapshot.diskList.get(0).volumeId());
+        assertEquals(Long.valueOf(34359738368L), snapshot.diskList.get(0).sizeBytes);
+        assertTrue(snapshot.diskList.get(0).root);
+        assertEquals("nfs:110/vm-110-disk-1.qcow2", snapshot.diskList.get(1).volumeId());
+        assertNull(snapshot.diskList.get(2).volumeId());
+    }
+
+    @Test
+    public void ambiguousOrMalformedDisksAreRejected() {
+        String a = "{\"device\":\"scsi0\",\"storage\":\"s\",\"volume\":\"v\",\"size_bytes\":1,\"root\":true}";
+        rejects(withDisks(a + "," + a));
+        rejects(withDisks(a + "," + a.replace("scsi0", "scsi1")));
+        rejects(withDisks(a + "," + a.replace("scsi0", "scsi1").replace("\"v\"", "\"w\"")));
+        rejects(withDisks(a.replace("\"volume\":\"v\"", "\"volume\":null")));
+        rejects(withDisks(a.replace("\"v\"", "\"other:v\"")));
+        rejects(withDisks(a.replace("\"size_bytes\":1", "\"size_bytes\":-5")));
+        rejects(withDisks(a.replace("scsi0", "nvme0")));
+        rejects(withDisks(a.replace("\"root\":true", "\"root\":\"yes\"")));
     }
 }

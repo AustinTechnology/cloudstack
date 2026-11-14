@@ -34,6 +34,8 @@ public class ExternalAdoptionResponse extends BaseResponse {
     @SerializedName("instancename") private String instanceName;
     @SerializedName("claimid") private String claimId;
     @SerializedName("generation") private Integer generation;
+    @SerializedName("volumechanges") private List<org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.Change> volumes;
+    @SerializedName("volumenotes") private List<String> volumeNotes;
 
     ExternalAdoptionResponse(boolean dryRun, String cluster, int vmid, String node, String name, String power, int cpus, int memoryMb, List<String> nics) {
         this.dryRun = dryRun; this.cluster = cluster; this.vmid = vmid; this.node = node; this.name = name; this.power = power;
@@ -42,6 +44,9 @@ public class ExternalAdoptionResponse extends BaseResponse {
     }
     void adopted(String vmUuid, String instanceName, String claimId, int generation) {
         this.vmUuid = vmUuid; this.instanceName = instanceName; this.claimId = claimId; this.generation = generation;
+    }
+    void volumes(List<org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.Change> volumes, List<String> notes) {
+        this.volumes = volumes; this.volumeNotes = notes;
     }
     public boolean isDryRun() { return dryRun; }
     public String getVmUuid() { return vmUuid; }

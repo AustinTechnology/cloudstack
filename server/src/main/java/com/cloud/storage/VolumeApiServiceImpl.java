@@ -3448,6 +3448,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             throw new InvalidParameterValueException("Can't detach a volume from a Shared FileSystem Instance");
         }
 
+        rejectVolumeOfExternalInstance(volume);
+
         if (vm.getState() != State.Running && vm.getState() != State.Stopped && vm.getState() != State.Destroyed) {
             throw new InvalidParameterValueException("Please specify a VM that is either running or stopped.");
         }
@@ -4411,6 +4413,10 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             throw new InvalidParameterValueException(String.format("Volume: %s is not in %s state but %s. Cannot take snapshot.", volume.getVolume(), Volume.State.Ready, volume.getState()));
         }
 
+        if (HypervisorType.External.equals(volume.getHypervisorType())) {
+            throw new InvalidParameterValueException("Snapshot operations are not allowed for External hypervisor type");
+        }
+
         if (ImageFormat.DIR.equals(volume.getFormat())) {
             throw new InvalidParameterValueException(String.format("Snapshot not supported for volume: %s", volume.getVolume()));
         }
@@ -4560,6 +4566,17 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         return snapshotMgr.allocSnapshot(volumeId, Snapshot.MANUAL_POLICY_ID, snapshotName, null, true, null);
     }
 
+    /**
+     * The disks of an External instance are part of it at its orchestrator. Their volumes describe them, and
+     * cannot be taken away from the instance or copied out of its storage from here.
+     */
+    protected void rejectVolumeOfExternalInstance(Volume volume) {
+        VMInstanceVO vm = volume.getInstanceId() == null ? null : _vmInstanceDao.findById(volume.getInstanceId());
+        if (vm != null && HypervisorType.External.equals(vm.getHypervisorType())) {
+            throw new InvalidParameterValueException("This operation is not supported for a volume of an External hypervisor instance");
+        }
+    }
+
     @Override
     @ActionEvent(eventType = EventTypes.EVENT_VOLUME_EXTRACT, eventDescription = "extracting volume", async = true)
     public String extractVolume(ExtractVolumeCmd cmd) {
@@ -4581,6 +4598,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
         // perform permission check
         _accountMgr.checkAccess(account, null, true, volume);
+        rejectVolumeOfExternalInstance(volume);
 
         if (_dcDao.findById(zoneId) == null) {
             throw new InvalidParameterValueException("Please specify a valid zone.");

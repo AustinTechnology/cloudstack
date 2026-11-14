@@ -1518,7 +1518,10 @@ public class VolumeOrchestrator extends ManagerBase implements VolumeOrchestrati
                 for (VolumeVO vol : volumesForVm) {
                     String volumeToString = getReflectOnlySelectedFields(vol);
 
-                    if (vol.getVolumeType().equals(Type.ROOT)) {
+                    // The data disks of an External instance go with it, like its root disk: at the provider they
+                    // are part of the instance, so a detached record would describe nothing.
+                    boolean external = vm != null && HypervisorType.External.equals(vm.getHypervisorType());
+                    if (vol.getVolumeType().equals(Type.ROOT) || external) {
                         // Destroy volume if not already destroyed
                         boolean volumeAlreadyDestroyed = (vol.getState() == Volume.State.Destroy || vol.getState() == Volume.State.Expunged || vol.getState() == Volume.State.Expunging);
                         if (!volumeAlreadyDestroyed) {

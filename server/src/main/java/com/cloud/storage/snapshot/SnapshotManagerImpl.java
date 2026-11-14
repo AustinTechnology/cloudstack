@@ -1186,6 +1186,11 @@ public class SnapshotManagerImpl extends MutualExclusiveIdsManagerBase implement
         final Account caller = CallContext.current().getCallingAccount();
         _accountMgr.checkAccess(caller, null, true, volume);
 
+        VMInstanceVO attachedTo = volume.getInstanceId() == null ? null : _vmDao.findById(volume.getInstanceId());
+        if (attachedTo != null && HypervisorType.External.equals(attachedTo.getHypervisorType())) {
+            throw new InvalidParameterValueException("Snapshot operations are not allowed for External hypervisor type");
+        }
+
         // If display is false we don't actually schedule snapshots.
         if (volume.getState() != Volume.State.Ready && display) {
             throw new InvalidParameterValueException(String.format("Volume: %s is not in %s state but %s. Cannot take snapshot.", volume, Volume.State.Ready, volume.getState()));

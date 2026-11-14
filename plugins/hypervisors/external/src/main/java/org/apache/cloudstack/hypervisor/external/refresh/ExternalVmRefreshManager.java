@@ -34,6 +34,7 @@ import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.hypervisor.external.observation.ExternalObservationService;
 import org.apache.cloudstack.hypervisor.external.observation.ObservationBindingResolver;
 import org.apache.cloudstack.hypervisor.external.observation.ObservationValidation;
+import org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync;
 import com.cloud.dc.dao.DataCenterDao;
 import com.cloud.exception.InsufficientCapacityException;
 import com.cloud.network.Network;
@@ -86,6 +87,7 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
     @Inject ExternalObservationService observationService;
     @Inject NetworkOrchestrationService networkOrchestrator;
     @Inject DataCenterDao dataCenterDao;
+    @Inject ExternalVolumeSync volumeSync;
 
     @Override public List<Class<?>> getCommands() { return List.of(RefreshExternalVirtualMachineCmd.class); }
 
@@ -211,7 +213,7 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
             HostVO host = hostDao.findById(current.hostId);
             Map<String, Map<String, String>> access = host == null ? null : extensionsManager.getExternalAccessDetails(host, null);
             String bridge = access == null || access.get("host") == null ? null : access.get("host").get("network_bridge");
-            return reconcile(locked, fresh, dryRun, nicRefresh, evidence, bridge);
+            return reconcile(locked, fresh, dryRun, nicRefresh, evidence, bridge, current.clusterId);
             });
         } catch (SQLException e) {
             throw new CloudRuntimeException("Cannot establish refresh transaction isolation", e);
@@ -221,11 +223,16 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
     }
 
     ExternalVmRefreshResponse reconcile(VMInstanceVO vm, ExternalVmConfiguration snapshot, boolean dryRun) {
-        return reconcile(vm, snapshot, dryRun, null, Collections.emptyMap(), null);
+        return reconcile(vm, snapshot, dryRun, null, Collections.emptyMap(), null, null);
     }
 
     ExternalVmRefreshResponse reconcile(VMInstanceVO vm, ExternalVmConfiguration snapshot, boolean dryRun,
             ExternalNativeNicRefresh nicRefresh, Map<String, ExternalNativeNicRefresh.Evidence> evidence, String bridge) {
+        return reconcile(vm, snapshot, dryRun, nicRefresh, evidence, bridge, null);
+    }
+
+    ExternalVmRefreshResponse reconcile(VMInstanceVO vm, ExternalVmConfiguration snapshot, boolean dryRun,
+            ExternalNativeNicRefresh nicRefresh, Map<String, ExternalNativeNicRefresh.Evidence> evidence, String bridge, Long clusterId) {
         ServiceOfferingVO base = offeringDao.findByIdIncludingRemoved(vm.getServiceOfferingId());
         // The DAO's map projection otherwise hides duplicate custom keys.
         uniqueDetail(vm.getId(), "cpuNumber");
@@ -261,7 +268,6 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
             }
         }
         if (!snapshot.agentAvailable) unresolved.add("guest agent unavailable; only qualified observation fallback may update addresses");
-        if (snapshot.disks.size() > 0) unresolved.add("disk topology is report-only");
         boolean changed = oldCpu != targetCpu || oldMemory != targetMemory;
         // Metadata refresh uses fresh source reads and a locked native VM binding.
         // It does not authorize adoption, power changes, or claim transitions.
@@ -304,12 +310,20 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
         }
         List<ExternalVmRefreshResponse.IpChange> ipChanges = nicRefresh == null ? Collections.emptyList()
                 : nicRefresh.apply(vm, snapshot, evidence, bridge, dryRun, unresolved);
+        // Disks become volume records on the storages registered for the cluster. Nothing is written to the provider.
+        List<ExternalVolumeSync.Change> volumeChanges = Collections.emptyList();
+        if (volumeSync == null || clusterId == null) {
+            if (snapshot.disks.size() > 0) unresolved.add("disk topology is report-only");
+        } else {
+            volumeChanges = volumeSync.sync(vm, clusterId, snapshot, dryRun, unresolved);
+        }
         // Last, after every provider read: nothing above is committed if an operation started meanwhile.
         if (adopted && !dryRun && !claimStillIdle(vm.getUuid(), claimStamp)) {
             throw new InvalidParameterValueException("An operation started on the adopted instance during the refresh; nothing was changed");
         }
-        return new ExternalVmRefreshResponse(vm.getUuid(), dryRun, !dryRun && (changed || !ipChanges.isEmpty() || !imported.isEmpty()),
-                snapshot, oldCpu, oldMemory, unresolved, ipChanges, imported);
+        return new ExternalVmRefreshResponse(vm.getUuid(), dryRun,
+                !dryRun && (changed || !ipChanges.isEmpty() || !imported.isEmpty() || !volumeChanges.isEmpty()),
+                snapshot, oldCpu, oldMemory, unresolved, ipChanges, imported, volumeChanges);
     }
 
     protected String claimIdleStamp(String vmUuid) {

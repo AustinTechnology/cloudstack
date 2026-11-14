@@ -51,6 +51,29 @@ public final class ExternalVmConfiguration {
         }
     }
 
+    /** One data-bearing disk as the instance's provider configuration references it. */
+    public static final class Disk {
+        /** Provider slot, for example scsi0. */
+        public final String device;
+        /** Null for a passthrough device, which is on no storage. */
+        public final String storage;
+        public final String volume;
+        /** Null when the provider reports no size. */
+        public final Long sizeBytes;
+        public final boolean root;
+        private Disk(String device, String storage, String volume, Long sizeBytes, boolean root) {
+            this.device = device;
+            this.storage = storage;
+            this.volume = volume;
+            this.sizeBytes = sizeBytes;
+            this.root = root;
+        }
+        /** The provider's own identifier of the volume: storage and volume name. Never derived from the instance. */
+        public String volumeId() {
+            return storage == null ? null : storage + ":" + volume;
+        }
+    }
+
     public final String cluster;
     public final String vmid;
     public final String name;
@@ -61,11 +84,12 @@ public final class ExternalVmConfiguration {
     public final int memoryMb;
     public final boolean agentAvailable;
     public final List<Nic> nics;
-    /** Provider disk inventory is report-only, never a storage mutation instruction. */
+    /** Provider disk inventory as received. Never a storage mutation instruction. */
     public final JsonArray disks;
+    public final List<Disk> diskList;
 
     private ExternalVmConfiguration(String cluster, String vmid, String name, String node, String power, String configDigest, int cpus,
-            int memoryMb, boolean agentAvailable, List<Nic> nics, JsonArray disks) {
+            int memoryMb, boolean agentAvailable, List<Nic> nics, JsonArray disks, List<Disk> diskList) {
         this.cluster = cluster;
         this.vmid = vmid;
         this.name = name;
@@ -77,6 +101,7 @@ public final class ExternalVmConfiguration {
         this.agentAvailable = agentAvailable;
         this.nics = Collections.unmodifiableList(nics);
         this.disks = disks.deepCopy();
+        this.diskList = Collections.unmodifiableList(diskList);
     }
 
     private static IllegalArgumentException invalid(String field) {
@@ -117,6 +142,9 @@ public final class ExternalVmConfiguration {
         return s;
     }
 
+    private static String optionalText(JsonElement value, String field) {
+        return value == null || value.isJsonNull() ? null : text(value, field);
+    }
     private static int integer(JsonElement value, String field, int min, int max) {
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
             throw invalid(field);
@@ -278,9 +306,47 @@ public final class ExternalVmConfiguration {
             nics.add(new Nic(id, mac, bridge, vlan, addresses));
         }
         JsonArray disks = array(root.get("disks"), "disks");
-        for (JsonElement disk : disks) {
-            object(disk, "disks entry");
+        List<Disk> diskList = new ArrayList<>();
+        Set<String> diskDevices = new HashSet<>();
+        Set<String> volumeIds = new HashSet<>();
+        int roots = 0;
+        for (JsonElement element : disks) {
+            JsonObject disk = object(element, "disks entry");
+            String device = text(disk.get("device"), "disks.device");
+            if (!device.matches("(scsi|sata|virtio|ide)(0|[1-9][0-9]?)") || !diskDevices.add(device)) {
+                throw invalid("disks.device");
+            }
+            // An extension that predates disk details reports only the device; such a disk has no volume identity.
+            String storage = optionalText(disk.get("storage"), "disks.storage");
+            String volume = optionalText(disk.get("volume"), "disks.volume");
+            if ((storage == null) != (volume == null)
+                    || (storage != null && (!storage.matches("[A-Za-z][A-Za-z0-9._-]*") || volume.contains(":") || volume.contains(",")))) {
+                throw invalid("disks.volume");
+            }
+            if (storage != null && !volumeIds.add(storage + ":" + volume)) {
+                throw invalid("disks.volume");
+            }
+            Long size = null;
+            JsonElement sizeElement = disk.get("size_bytes");
+            if (sizeElement != null && !sizeElement.isJsonNull()) {
+                if (!sizeElement.isJsonPrimitive() || !sizeElement.getAsJsonPrimitive().isNumber() || !sizeElement.getAsString().matches("[1-9][0-9]{0,17}")) {
+                    throw invalid("disks.size_bytes");
+                }
+                size = Long.parseLong(sizeElement.getAsString());
+            }
+            boolean isRoot = false;
+            JsonElement rootElement = disk.get("root");
+            if (rootElement != null && !rootElement.isJsonNull()) {
+                if (!rootElement.isJsonPrimitive() || !rootElement.getAsJsonPrimitive().isBoolean()) {
+                    throw invalid("disks.root");
+                }
+                isRoot = rootElement.getAsBoolean();
+            }
+            if (isRoot && ++roots > 1) {
+                throw invalid("disks.root");
+            }
+            diskList.add(new Disk(device, storage, volume, size, isRoot));
         }
-        return new ExternalVmConfiguration(cluster, vmid, name, node, power, digest, cpus, memory, agent.getAsBoolean(), nics, disks);
+        return new ExternalVmConfiguration(cluster, vmid, name, node, power, digest, cpus, memory, agent.getAsBoolean(), nics, disks, diskList);
     }
 }

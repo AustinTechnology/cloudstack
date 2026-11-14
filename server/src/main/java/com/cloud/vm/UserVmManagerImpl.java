@@ -3792,9 +3792,12 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
         stopVirtualMachine(vmId, VmDestroyForcestop.value());
 
-        // Detach all data disks from VM
-        List<VolumeVO> dataVols = _volsDao.findByInstanceAndType(vmId, Volume.Type.DATADISK);
-        detachVolumesFromVm(vm, dataVols);
+        // Detach all data disks from VM. The disks of an External instance belong to it at the provider
+        // and cannot exist detached, so their records stay with the instance until it is expunged.
+        if (!HypervisorType.External.equals(vm.getHypervisorType())) {
+            List<VolumeVO> dataVols = _volsDao.findByInstanceAndType(vmId, Volume.Type.DATADISK);
+            detachVolumesFromVm(vm, dataVols);
+        }
 
         UserVm destroyedVm = destroyVm(vmId, expunge);
         if (expunge) {

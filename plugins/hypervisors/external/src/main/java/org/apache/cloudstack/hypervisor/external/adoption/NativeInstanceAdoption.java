@@ -102,6 +102,7 @@ public class NativeInstanceAdoption {
     @Inject NetworkOrchestrationService networkOrchestrator;
     @Inject ExternalVmRefreshManager refreshManager;
     @Inject NativeManagedAdoptionVerifier verifier;
+    @Inject org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync volumeSync;
 
     public static final class Request {
         final Long hostId, serviceOfferingId, templateId, domainId;
@@ -300,7 +301,13 @@ public class NativeInstanceAdoption {
 
         final ExternalAdoptionResponse response = new ExternalAdoptionResponse(request.dryRun, cluster, request.vmid, snapshot.node,
                 snapshot.name, snapshot.power, snapshot.cpus, snapshot.memoryMb, nicReport);
-        if (request.dryRun) return response;
+        // Disks are recorded as volumes where their storage is registered. A disk that cannot be recorded is
+        // reported and does not stop the adoption: the instance is adopted with the disks it has.
+        if (request.dryRun) {
+            List<String> notes = new ArrayList<>();
+            response.volumes(volumeSync.sync(null, owner, host.getClusterId(), snapshot, true, notes), notes);
+            return response;
+        }
 
         final String manifest = manifest(snapshot, request.vmid, owner, domainUuid, nics);
         final String hash = sha256(manifest);
@@ -355,6 +362,8 @@ public class NativeInstanceAdoption {
                 return again;
             }));
             account(vm, offering, template, running, imported);
+            List<String> notes = new ArrayList<>();
+            response.volumes(volumeSync.sync(vm, host.getClusterId(), snapshot, false, notes), notes);
             response.adopted(vm.getUuid(), vm.getInstanceName(), claim.claimId, claim.generation);
             return response;
         });

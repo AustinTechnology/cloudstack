@@ -94,6 +94,7 @@ public class NativeInstanceAdoptionTest {
         a.vmManager = mock(VirtualMachineManager.class); a.userVmService = mock(UserVmService.class);
         a.networkOrchestrator = mock(NetworkOrchestrationService.class); a.refreshManager = mock(ExternalVmRefreshManager.class);
         a.verifier = mock(NativeManagedAdoptionVerifier.class);
+        a.volumeSync = mock(org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.class);
         host1 = mock(HostVO.class); host2 = mock(HostVO.class); answer = mock(Answer.class); owner = mock(Account.class);
         offering = mock(ServiceOfferingVO.class); template = mock(VMTemplateVO.class); network = mock(NetworkVO.class);
         Extension extension = mock(Extension.class);

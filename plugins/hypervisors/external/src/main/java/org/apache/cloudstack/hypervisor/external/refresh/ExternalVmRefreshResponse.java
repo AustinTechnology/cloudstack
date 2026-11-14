@@ -33,6 +33,7 @@ public class ExternalVmRefreshResponse extends BaseResponse {
     @SerializedName("unresolved") private List<String> unresolved;
     @SerializedName("ipchanges") private List<IpChange> ipChanges;
     @SerializedName("nicimports") private List<String> nicImports;
+    @SerializedName("volumechanges") private List<org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.Change> volumeChanges;
 
     public static final class IpChange {
         @SerializedName("nicid") final String nicId;
@@ -46,8 +47,10 @@ public class ExternalVmRefreshResponse extends BaseResponse {
     }
 
     ExternalVmRefreshResponse(String id, boolean dryRun, boolean applied, ExternalVmConfiguration snapshot,
-            int currentCpus, int currentMemoryMb, List<String> unresolved, List<IpChange> ipChanges, List<String> nicImports) {
+            int currentCpus, int currentMemoryMb, List<String> unresolved, List<IpChange> ipChanges, List<String> nicImports,
+            List<org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.Change> volumeChanges) {
         this.nicImports = nicImports;
+        this.volumeChanges = volumeChanges;
         this.id = id;
         this.dryRun = dryRun;
         this.applied = applied;

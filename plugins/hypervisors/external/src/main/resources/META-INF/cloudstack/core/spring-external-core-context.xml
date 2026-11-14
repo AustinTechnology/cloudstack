@@ -28,4 +28,7 @@
                       >
     <bean id="ExternalProvisioner" class="org.apache.cloudstack.hypervisor.external.provisioner.ExternalPathPayloadProvisioner"/>
     <bean id="ExternalAgentManager" class="org.apache.cloudstack.agent.manager.ExternalAgentManagerImpl" />
+    <!-- Used by both the storage provider (external-storage) and the instance refresh (external-compute). -->
+    <bean id="ExternalStorageInventory" class="org.apache.cloudstack.hypervisor.external.storage.ExternalStorageInventory" />
+    <bean id="ExternalVolumeSync" class="org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync" />
 </beans>
