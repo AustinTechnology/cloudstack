@@ -176,13 +176,13 @@ Before production:
 - **Role.** Add `Sys.Console` to the production `CloudStackExtension` role first. Without it a start that needs to change HA fails. Review what else that privilege allows before granting it.
 - **Jar first, flag second.** With the old jar, an External VM with the flag on makes CloudStack compete with Proxmox HA.
 
-**Found in production, 14 Nov 2026: CloudStack hard-stops guests after an out-of-band stop.** Not fixed in the lab code yet.
+**Found in production, 14 Nov 2026: CloudStack hard-stops guests after an out-of-band stop.** Fixed in the lab (build `native-adoption-api-v11`); production still has it.
 
 - When a host reports a VM off that CloudStack has as Running, `VirtualMachineManagerImpl.handlePowerOffReportWithNoPendingJobsOnVM` sends a `StopCommand` with `checkBeforeCleanup=true` before it marks the VM Stopped. This path does not depend on the HA flag.
 - KVM answers that command without stopping a guest that is running (`LibvirtStopCommandWrapper`). The External plugin ignores the flag and the script issues a real Proxmox stop.
 - If the guest was started again before the command arrives, it is powered off. Evidence and counts: the operator notes.
-- The lab code acknowledges the command without a provider call only for an adopted guest that is already off; a guest that is running again is still stopped, and non-adopted guests always are.
-- Fix to make: a `checkBeforeCleanup` stop never changes the provider. Read the power state; off answers success, running answers failure so CloudStack leaves the VM Running.
+- Fix: a `checkBeforeCleanup` stop never changes the provider. The host's power report is read again; off answers success, running answers failure so CloudStack leaves the VM Running, anything else answers failure. It applies to every External instance.
+- Lab: the race was reproduced on the previous build (CloudStack's stop landed 19 s after the guest was started again) and does not happen on v11, for an ordinary and an adopted guest. The operator notes, last section.
 
 ### Step 5: scale VM (done in the lab, 12 Nov 2026)
 
