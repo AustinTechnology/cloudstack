@@ -23,6 +23,8 @@ import javax.naming.ConfigurationException;
 
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.framework.extensions.command.ExtensionRoutingUpdateCommand;
+import org.apache.cloudstack.storage.command.AttachCommand;
+import org.apache.cloudstack.storage.command.DettachCommand;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
@@ -135,6 +137,10 @@ public class ExternalResource implements ServerResource {
         cmd.setGuid(guid);
         cmd.setIqn(guid);
         cmd.setVersion(ExternalResource.class.getPackage().getImplementationVersion());
+        // As a KVM host does: how many CD drives an instance can have here. vm.iso.max.count decides within it.
+        Map<String, String> hostDetails = cmd.getHostDetails() == null ? new java.util.HashMap<>() : cmd.getHostDetails();
+        hostDetails.put(Host.HOST_CDROM_MAX_COUNT, "2");
+        cmd.setHostDetails(hostDetails);
         return new StartupCommand[] {cmd};
     }
 
@@ -192,6 +198,10 @@ public class ExternalResource implements ServerResource {
                 return execute((UnPlugNicCommand) cmd);
             } else if (cmd instanceof GetVmIpAddressCommand) {
                 return execute((GetVmIpAddressCommand) cmd);
+            } else if (cmd instanceof AttachCommand && isIso(((AttachCommand) cmd).getDisk())) {
+                return execute((AttachCommand) cmd);
+            } else if (cmd instanceof DettachCommand && isIso(((DettachCommand) cmd).getDisk())) {
+                return execute((DettachCommand) cmd);
             } else {
                 return execute(cmd);
             }
@@ -338,6 +348,24 @@ public class ExternalResource implements ServerResource {
             return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
         }
         return externalProvisioner.getInstanceIpAddress(guid, extensionName, extensionRelativePath, cmd);
+    }
+
+    private static boolean isIso(com.cloud.agent.api.to.DiskTO disk) {
+        return disk != null && disk.getType() == com.cloud.storage.Volume.Type.ISO;
+    }
+
+    public Answer execute(AttachCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        return externalProvisioner.attachInstanceIso(guid, extensionName, extensionRelativePath, cmd);
+    }
+
+    public Answer execute(DettachCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        return externalProvisioner.detachInstanceIso(guid, extensionName, extensionRelativePath, cmd);
     }
 
     public PlugNicAnswer execute(PlugNicCommand cmd) {

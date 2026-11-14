@@ -78,4 +78,10 @@ public interface ExternalProvisioner extends Manager {
     PlugNicAnswer plugInstanceNic(String hostGuid, String extensionName, String extensionRelativePath, PlugNicCommand cmd);
 
     UnPlugNicAnswer unplugInstanceNic(String hostGuid, String extensionName, String extensionRelativePath, UnPlugNicCommand cmd);
+
+    /** Loads the ISO the command names into a CD drive of a running instance. */
+    Answer attachInstanceIso(String hostGuid, String extensionName, String extensionRelativePath, org.apache.cloudstack.storage.command.AttachCommand cmd);
+
+    /** Empties the CD drive of a running instance that holds the ISO the command names. */
+    Answer detachInstanceIso(String hostGuid, String extensionName, String extensionRelativePath, org.apache.cloudstack.storage.command.DettachCommand cmd);
 }

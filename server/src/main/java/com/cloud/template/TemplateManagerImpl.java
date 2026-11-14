@@ -151,6 +151,7 @@ import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
 import com.cloud.host.dao.HostDetailsDao;
+import com.cloud.hypervisor.ExternalIsoCopies;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.hypervisor.HypervisorGuru;
@@ -258,6 +259,8 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
     private AccountManager _accountMgr;
     @Inject
     private HostDao _hostDao;
+    @Inject
+    private ExternalIsoCopies externalIsoCopies;
     @Inject
     private HostDetailsDao _hostDetailsDao;
     @Inject
@@ -1348,7 +1351,7 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
             throw new InvalidParameterValueException("Operation not supported on Shared FileSystem Instance");
         }
 
-        if (HypervisorType.External.equals(vm.getHypervisorType())) {
+        if (HypervisorType.External.equals(vm.getHypervisorType()) && !externalIsoCopies.supported(vm)) {
             throw new InvalidParameterValueException("Attach ISO operation is not allowed for External hypervisor type");
         }
 
@@ -1466,6 +1469,10 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
             ((DettachCommand)cmd).setForced(forced);
         }
         Answer a = _agentMgr.easySend(vm.getHostId(), cmd);
+        if (a != null && !a.getResult() && HypervisorType.External.equals(vm.getHypervisorType()) && StringUtils.isNotBlank(a.getDetails())) {
+            // An orchestrator says why, and it is usually something the caller can act on.
+            throw new CloudRuntimeException(a.getDetails());
+        }
         return (a != null && a.getResult());
     }
 
@@ -1688,6 +1695,14 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
         TemplateProfile profile = adapter.prepareDelete(cmd);
         boolean result = adapter.delete(profile);
         if (result) {
+            // The copies External orchestrators made of the ISO go with it. The ISO is deleted either way.
+            try {
+                for (String kept : externalIsoCopies.removeCopies(template, zoneId)) {
+                    logger.warn("ISO {} was deleted; at an external system {}", template.getUuid(), kept);
+                }
+            } catch (RuntimeException e) {
+                logger.warn("ISO {} was deleted; its copies at external systems could not be removed: {}", template.getUuid(), e.getMessage());
+            }
             return true;
         } else {
             throw new CloudRuntimeException("Failed to delete ISO");

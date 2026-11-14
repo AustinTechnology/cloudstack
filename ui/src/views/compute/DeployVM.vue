@@ -579,7 +579,7 @@
                   </span>
                   <div style="margin-top: 15px" v-if="showDetails">
                     <div
-                      v-if="['KVM', 'VMware', 'XenServer'].includes(hypervisor) && ((vm.templateid && template && !template.deployasis) || vm.isoid)">
+                      v-if="(['KVM', 'VMware', 'XenServer'].includes(hypervisor) || (hypervisor === 'External' && vm.isoid)) && ((vm.templateid && template && !template.deployasis) || vm.isoid)">
                       <a-form-item :label="$t('label.boottype')" name="boottype" ref="boottype">
                         <a-select
                           v-model:value="form.boottype"
@@ -1578,6 +1578,17 @@ export default {
       if (to.name === 'deployVirtualMachine') {
         this.resetData()
       }
+    },
+    hypervisor (newValue, oldValue) {
+      // An External instance created from an ISO is UEFI unless BIOS is chosen. Secure boot is a choice, not the default.
+      if (this.imageType !== 'isoid' || (newValue !== 'External' && oldValue !== 'External')) {
+        return
+      }
+      this.defaultBootType = newValue === 'External' ? 'UEFI' : 'BIOS'
+      this.form.boottype = this.defaultBootType
+      this.fetchBootModes(this.defaultBootType)
+      this.defaultBootMode = 'LEGACY'
+      this.form.bootmode = this.defaultBootMode
     },
     formModel: {
       deep: true,

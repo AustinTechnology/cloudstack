@@ -61,6 +61,11 @@ public interface ExtensionHelper {
     /** Whether this enabled orchestrator reports the disks of its instances and can add, grow, delete and move them. */
     boolean isInstanceStorageSupported(long extensionId);
 
+    String INSTANCE_ISO_SUPPORTED = "instanceisosupported";
+
+    /** Whether this enabled orchestrator can change the ISOs in the CD drives of its instances and create an instance from an ISO. */
+    boolean isInstanceIsoSupported(long extensionId);
+
     /**
      * Network Guru of Network Extension
      */

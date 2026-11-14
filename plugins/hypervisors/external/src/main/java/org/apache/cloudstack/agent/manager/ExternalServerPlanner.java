@@ -25,6 +25,7 @@ import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
 import org.apache.cloudstack.extension.Extension;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.extension.ExtensionResourceMap;
 import org.apache.cloudstack.framework.extensions.dao.ExtensionDao;
 import org.apache.cloudstack.framework.extensions.dao.ExtensionResourceMapDao;
@@ -68,6 +69,20 @@ public class ExternalServerPlanner extends AdapterBase implements DeploymentPlan
     ExtensionDao extensionDao;
     @Inject
     ExtensionResourceMapDao extensionResourceMapDao;
+    @Inject
+    ExtensionHelper extensionHelper;
+
+    /**
+     * An ISO belongs to no extension. An instance created from one can go to any cluster whose extension is
+     * enabled, ready and says it can create an instance from an ISO.
+     */
+    protected List<Long> isoClusterIds(List<Long> clusterIds) {
+        return clusterIds.stream().filter(clusterId -> {
+            Long id = extensionHelper.getExtensionIdForCluster(clusterId);
+            ExtensionVO extension = id == null ? null : extensionDao.findById(id);
+            return extension != null && extension.isPathReady() && extensionHelper.isInstanceIsoSupported(id);
+        }).collect(Collectors.toList());
+    }
 
     @Override
     public DeployDestination plan(VirtualMachineProfile vmProfile, DeploymentPlan plan, ExcludeList avoid) throws InsufficientServerCapacityException {
@@ -75,18 +90,21 @@ public class ExternalServerPlanner extends AdapterBase implements DeploymentPlan
         ServiceOffering offering = vmProfile.getServiceOffering();
         VirtualMachineTemplate template = vmProfile.getTemplate();
         Long extensionId = template.getExtensionId();
-        final ExtensionVO extensionVO = extensionDao.findById(extensionId);
-        if (extensionVO == null) {
+        final boolean fromIso = extensionId == null && com.cloud.storage.Storage.ImageFormat.ISO == template.getFormat();
+        final ExtensionVO extensionVO = fromIso ? null : extensionDao.findById(extensionId);
+        if (fromIso) {
+            logger.debug("External instance {} is created from an ISO; its cluster's extension is used", vmProfile.getInstanceName());
+        } else if (extensionVO == null) {
             logger.error("Extension associated with {} cannot be found during deployment of external instance {}",
                     template, vmProfile.getInstanceName());
             return null;
         }
-        if (!Extension.State.Enabled.equals(extensionVO.getState())) {
+        if (!fromIso && !Extension.State.Enabled.equals(extensionVO.getState())) {
             logger.error("{} is not in enabled state therefore planning can not be done for deployment of external instance {}",
                     extensionVO, vmProfile.getInstanceName());
             return null;
         }
-        if (!extensionVO.isPathReady()) {
+        if (!fromIso && !extensionVO.isPathReady()) {
             logger.error("{} path is not in ready state therefore planning can not be done for deployment of external instance {}",
                     extensionVO, vmProfile.getInstanceName());
             return null;
@@ -115,8 +133,8 @@ public class ExternalServerPlanner extends AdapterBase implements DeploymentPlan
 
         List<Long> clusterIds = clusterDao.listEnabledClusterIdsByZoneHypervisorArch(vm.getDataCenterId(),
                 HypervisorType.External, vmProfile.getTemplate().getArch());
-        List<Long> extensionClusterIds = extensionResourceMapDao.listResourceIdsByExtensionIdAndType(extensionId,
-                ExtensionResourceMap.ResourceType.Cluster);
+        List<Long> extensionClusterIds = fromIso ? isoClusterIds(clusterIds)
+                : extensionResourceMapDao.listResourceIdsByExtensionIdAndType(extensionId, ExtensionResourceMap.ResourceType.Cluster);
         if (CollectionUtils.isEmpty(extensionClusterIds)) {
             logger.error("No clusters associated with {} to plan deployment of external instance {}",
                     vmProfile.getInstanceName());
@@ -125,7 +143,7 @@ public class ExternalServerPlanner extends AdapterBase implements DeploymentPlan
         clusterIds = clusterIds.stream()
                 .filter(extensionClusterIds::contains)
                 .collect(Collectors.toList());
-        logger.debug("Found {} clusters associated with {}", clusterIds.size(), extensionVO);
+        logger.debug("Found {} clusters associated with {}", clusterIds.size(), fromIso ? "extensions that create from an ISO" : extensionVO);
         HostVO target = null;
         List<HostVO> hosts;
         for (Long clusterId : clusterIds) {

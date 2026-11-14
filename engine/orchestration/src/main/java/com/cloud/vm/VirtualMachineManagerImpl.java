@@ -78,6 +78,7 @@ import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.ca.Certificate;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.dao.ExtensionDetailsDao;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionDetailsVO;
@@ -467,6 +468,8 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
     private VolumeDataFactory volumeDataFactory;
     @Inject
     ExtensionsManager extensionsManager;
+    @Inject
+    ExtensionHelper extensionHelper;
     @Inject
     ExtensionDetailsDao extensionDetailsDao;
     @Inject
@@ -1301,11 +1304,18 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
     protected void processPrepareExternalProvisioning(boolean firstStart, Host host,
                  VirtualMachineProfile vmProfile, DataCenter dataCenter) throws CloudRuntimeException {
         VirtualMachineTemplate template = vmProfile.getTemplate();
-        if (!firstStart || host == null || !HypervisorType.External.equals(host.getHypervisorType()) ||
-                template.getExtensionId() == null) {
+        if (!firstStart || host == null || !HypervisorType.External.equals(host.getHypervisorType())) {
             return;
         }
-        ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(template.getExtensionId(),
+        Long extensionId = template.getExtensionId();
+        if (extensionId == null && ImageFormat.ISO == template.getFormat() && host.getClusterId() != null) {
+            // An ISO names no extension; the cluster the instance was placed on does.
+            extensionId = extensionHelper.getExtensionIdForCluster(host.getClusterId());
+        }
+        if (extensionId == null) {
+            return;
+        }
+        ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(extensionId,
                 ApiConstants.ORCHESTRATOR_REQUIRES_PREPARE_VM);
         if (detailsVO == null || !Boolean.parseBoolean(detailsVO.getValue())) {
             return;

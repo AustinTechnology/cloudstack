@@ -2301,6 +2301,14 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         return runInstanceAction(vm, action, parameters);
     }
 
+    @Override
+    public Answer changeInstanceIso(VirtualMachine vm, String action, Map<String, Object> parameters) {
+        if (!ISO_ACTIONS.contains(action)) {
+            return new Answer(null, false, "Unknown ISO action");
+        }
+        return runInstanceAction(vm, action, parameters);
+    }
+
     protected Answer runInstanceAction(VirtualMachine vm, String action, Map<String, Object> parameters) {
         Pair<Long, Long> clusterAndHostId = virtualMachineManager.findClusterAndHostIdForVm(vm, false);
         Host host = clusterAndHostId.second() == null ? null : hostDao.findById(clusterAndHostId.second());
@@ -2318,6 +2326,12 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             Extension extension = getExtensionForCluster(host.getClusterId());
             if (extension == null || !isInstanceStorageSupported(extension.getId())) {
                 return new Answer(null, false, "The instance's extension does not support storage.");
+            }
+        }
+        if (ISO_ACTIONS.contains(action)) {
+            Extension extension = getExtensionForCluster(host.getClusterId());
+            if (extension == null || !isInstanceIsoSupported(extension.getId())) {
+                return new Answer(null, false, "The instance's extension does not support ISOs.");
             }
         }
         if (GET_CONFIG_ACTION.equals(action)) {
@@ -2398,6 +2412,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             return false;
         }
         ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_NIC_CHANGE_SUPPORTED);
+        return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
+    }
+
+    @Override
+    public boolean isInstanceIsoSupported(long extensionId) {
+        Extension extension = getExtension(extensionId);
+        if (extension == null || extension.getType() != Extension.Type.Orchestrator
+                || extension.getState() != Extension.State.Enabled) {
+            return false;
+        }
+        ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_ISO_SUPPORTED);
         return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
     }
 

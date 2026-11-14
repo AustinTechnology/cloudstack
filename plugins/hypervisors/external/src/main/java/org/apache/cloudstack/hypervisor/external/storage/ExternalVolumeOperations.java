@@ -123,7 +123,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
     }
 
     /** The extension's own error text when its output carries one; its output otherwise. */
-    static String reason(String details) {
+    public static String reason(String details) {
         try {
             String json = details.substring(details.indexOf('{'), details.lastIndexOf('}') + 1);
             return JsonParser.parseString(json).getAsJsonObject().get("error").getAsString();

@@ -133,4 +133,13 @@ public interface ExtensionsManager extends Manager {
 
     /** A disk move copies the disk, so it is given longer than other actions: as long as any action may take. */
     int DISK_MOVE_WAIT_SECONDS = 6900;
+
+    /**
+     * Asks the orchestrator extension of an External instance to change what is in its CD drives. The action is one of
+     * {@link #ISO_ACTIONS}; the parameters are "volume" and, to name one drive, "drive".
+     * The extension must declare {@link org.apache.cloudstack.extension.ExtensionHelper#INSTANCE_ISO_SUPPORTED}.
+     */
+    Answer changeInstanceIso(VirtualMachine vm, String action, java.util.Map<String, Object> parameters);
+
+    java.util.List<String> ISO_ACTIONS = java.util.Arrays.asList("attachiso", "detachiso");
 }

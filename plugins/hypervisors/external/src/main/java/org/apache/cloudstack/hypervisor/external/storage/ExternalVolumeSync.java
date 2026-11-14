@@ -51,6 +51,8 @@ import com.cloud.user.AccountService;
 import com.cloud.user.ResourceLimitService;
 import com.cloud.vm.DiskProfile;
 import com.cloud.vm.VMInstanceVO;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.annotations.SerializedName;
 
 /**
@@ -88,8 +90,11 @@ public class ExternalVolumeSync {
         public Long getPreviousBytes() { return previousBytes; }
     }
 
+    protected org.apache.logging.log4j.Logger logger = org.apache.logging.log4j.LogManager.getLogger(getClass());
+
     @Inject VolumeDao volumeDao;
     @Inject VolumeDetailsDao volumeDetailsDao;
+    @Inject ExternalInstanceLock instanceLock;
     @Inject PrimaryDataStoreDao poolDao;
     @Inject com.cloud.dc.dao.ClusterDao clusterDao;
     @Inject ExternalStorageInventory inventory;
@@ -186,6 +191,32 @@ public class ExternalVolumeSync {
             VolumeVO volume = volumeDao.findByPoolIdAndPath(pool.getId(), id);
             if (volume != null && (vm == null || !live(volume) || volume.getInstanceId() == null || volume.getInstanceId() != vm.getId())) {
                 unresolved.add("disk " + disk.device + " (" + id + ") is recorded for another instance or is being removed; report-only");
+                continue;
+            }
+            // An instance created from an ISO was allocated its root volume before it had a disk. The boot disk
+            // the extension then created is that volume, when it is on the storage of the volume's offering.
+            VolumeVO allocated = null;
+            for (VolumeVO candidate : volume != null || !disk.root ? new ArrayList<VolumeVO>() : recorded) {
+                if (candidate.getVolumeType() == Volume.Type.ROOT && candidate.getState() == Volume.State.Allocated
+                        && candidate.getPath() == null && candidate.getPoolId() == null && !seen.contains(candidate.getId())) {
+                    allocated = candidate;
+                }
+            }
+            if (allocated != null) {
+                DiskOfferingVO own = diskOfferingDao.findByIdIncludingRemoved(allocated.getDiskOfferingId());
+                StoragePoolVO meant = pool(vm.getDataCenterId(), own);
+                seen.add(allocated.getId());
+                if (meant == null || meant.getId() != pool.getId()) {
+                    unresolved.add("the boot disk " + disk.device + " is on storage " + disk.storage + ", not the storage of the root volume's offering; report-only");
+                    continue;
+                }
+                changes.add(new Change(disk.device, id, "create", "ROOT", allocated.getSize(), disk.sizeBytes, own.getName(), !dryRun));
+                if (!dryRun) {
+                    created(allocated, pool, id, disk.device);
+                    if (!Objects.equals(allocated.getSize(), disk.sizeBytes)) {
+                        resize(allocated, disk.sizeBytes);
+                    }
+                }
                 continue;
             }
             if (volume == null) {
@@ -366,6 +397,39 @@ public class ExternalVolumeSync {
         volumeDao.update(volume.getId(), volume);
         volumeDao.attachVolume(volume.getId(), vm.getId(), deviceId);
         saveSlot(volume.getId(), device);
+    }
+
+    /** Records where the disk of an allocated root volume was created. It was counted when it was allocated. */
+    void created(VolumeVO volume, StoragePoolVO pool, String path, String device) {
+        volume.setPoolId(pool.getId());
+        volume.setPoolType(pool.getPoolType());
+        volume.setPath(path);
+        volume.setState(Volume.State.Ready);
+        volumeDao.update(volume.getId(), volume);
+        saveSlot(volume.getId(), device);
+    }
+
+    /**
+     * Records the disks of an instance the extension has just created, from what it reported of the new instance.
+     * Never fails: what is not recorded here is recorded by the next refresh.
+     */
+    public void recordCreated(VMInstanceVO vm, long clusterId, String output) {
+        try {
+            if (output == null || !inventory.supported(clusterId)) {
+                return;
+            }
+            String last = output.trim();
+            JsonObject result = JsonParser.parseString(last.substring(last.lastIndexOf("\n") + 1)).getAsJsonObject();
+            if (!result.has("config") || !result.get("config").isJsonObject()) {
+                return;
+            }
+            ExternalVmConfiguration snapshot = ExternalVmConfiguration.parse(result.get("config").toString());
+            List<String> unresolved = new ArrayList<>();
+            List<Change> changes = instanceLock.hold(vm.getId(), 1, () -> sync(vm, clusterId, snapshot, false, unresolved));
+            logger.info("Recorded {} disk(s) of new instance {}; left alone: {}", changes.size(), vm.getUuid(), unresolved);
+        } catch (RuntimeException e) {
+            logger.warn("The disks of new instance {} were not recorded and are left to a refresh: {}", vm.getUuid(), e.getMessage());
+        }
     }
 
     /** Records that a volume's disk is now on other storage. Its offering, counts and usage follow the storage. */

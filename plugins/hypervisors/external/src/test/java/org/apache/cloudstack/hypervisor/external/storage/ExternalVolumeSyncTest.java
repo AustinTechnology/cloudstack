@@ -271,6 +271,56 @@ public class ExternalVolumeSyncTest {
     }
 
     @Test
+    public void theRootVolumeAllocatedForAnIsoDeploymentBecomesTheBootDiskThatWasCreated() {
+        VolumeVO allocated = mock(VolumeVO.class);
+        when(allocated.getId()).thenReturn(35L);
+        when(allocated.getVolumeType()).thenReturn(Volume.Type.ROOT);
+        when(allocated.getState()).thenReturn(Volume.State.Allocated);
+        when(allocated.getPoolId()).thenReturn(null);
+        when(allocated.getSize()).thenReturn(32 * GIB);
+        when(allocated.getDeviceId()).thenReturn(0L);
+        when(allocated.getDiskOfferingId()).thenReturn(60L);
+        when(allocated.getUuid()).thenReturn("volume-35");
+        when(sync.volumeDao.findByInstance(10L)).thenReturn(Collections.singletonList(allocated));
+        when(vm.getDataCenterId()).thenReturn(3L);
+        when(pool.getStatus()).thenReturn(com.cloud.storage.StoragePoolStatus.Up);
+
+        List<ExternalVolumeSync.Change> changes = sync.sync(vm, 7L, snapshot(ROOT_DISK), false, unresolved);
+
+        assertEquals(1, changes.size());
+        assertEquals("create", changes.get(0).getAction());
+        assertEquals(Long.valueOf(32 * GIB), changes.get(0).getPreviousBytes());
+        verify(allocated).setPoolId(5L);
+        verify(allocated).setPath("ssd:vm-110-disk-0");
+        verify(allocated).setState(Volume.State.Ready);
+        verify(sync.volumeDetailsDao).addDetail(35L, ExternalVolumeSync.SLOT_DETAIL, "scsi0", false);
+        // It was counted when it was allocated, and no second root volume is made.
+        verify(sync.volumeManager, never()).importVolume(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verifyNoMoreInteractions(sync.resourceLimits);
+        assertTrue(unresolved.toString(), unresolved.isEmpty());
+    }
+
+    @Test
+    public void anAllocatedRootVolumeIsNotBoundToABootDiskOnOtherStorage() {
+        VolumeVO allocated = mock(VolumeVO.class);
+        when(allocated.getId()).thenReturn(35L);
+        when(allocated.getVolumeType()).thenReturn(Volume.Type.ROOT);
+        when(allocated.getState()).thenReturn(Volume.State.Allocated);
+        when(allocated.getPoolId()).thenReturn(null);
+        when(allocated.getDiskOfferingId()).thenReturn(61L);
+        when(sync.volumeDao.findByInstance(10L)).thenReturn(Collections.singletonList(allocated));
+        DiskOfferingVO other = offering("Standard HDD", "hdd-tier");
+        when(sync.diskOfferingDao.findByIdIncludingRemoved(61L)).thenReturn(other);
+        when(vm.getDataCenterId()).thenReturn(3L);
+        when(pool.getStatus()).thenReturn(com.cloud.storage.StoragePoolStatus.Up);
+
+        assertTrue(sync.sync(vm, 7L, snapshot(ROOT_DISK), false, unresolved).isEmpty());
+        verify(allocated, never()).setPath(any());
+        verify(sync.volumeManager, never()).importVolume(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals(1, unresolved.size());
+    }
+
+    @Test
     public void sizeChangeAtTheProviderUpdatesTheRecordAndTheCount() {
         VolumeVO volume = recorded(70L, Volume.Type.ROOT, "ssd:vm-110-disk-0", 20 * GIB, 0L, 10L);
         when(sync.volumeDao.findByInstance(10L)).thenReturn(Collections.singletonList(volume));

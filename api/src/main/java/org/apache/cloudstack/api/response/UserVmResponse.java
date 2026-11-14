@@ -389,6 +389,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
     @Param(description = "For an External Instance, true if its extension supports adding, growing, deleting and moving its disks.")
     private Boolean instanceStorageSupported;
 
+    @SerializedName(ExtensionHelper.INSTANCE_ISO_SUPPORTED)
+    @Param(description = "For an External Instance, true if its extension supports attaching and detaching ISOs.")
+    private Boolean instanceIsoSupported;
+
     @SerializedName(ApiConstants.DELETE_PROTECTION)
     @Param(description = "true if vm has delete protection.", since = "4.20.0")
     private boolean deleteProtection;
@@ -1190,6 +1194,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
 
     public void setInstanceStorageSupported(Boolean supported) {
         this.instanceStorageSupported = supported;
+    }
+
+    public void setInstanceIsoSupported(Boolean supported) {
+        this.instanceIsoSupported = supported;
     }
 
     public Boolean getInstanceScaleSupported() {

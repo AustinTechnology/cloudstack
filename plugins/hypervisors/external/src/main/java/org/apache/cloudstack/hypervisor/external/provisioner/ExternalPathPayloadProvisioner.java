@@ -54,6 +54,12 @@ import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.hypervisor.external.adoption.AdoptionRegistry;
+import org.apache.cloudstack.hypervisor.external.storage.ExternalInstanceLock;
+import org.apache.cloudstack.hypervisor.external.storage.ExternalIsoLibrary;
+import org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeOperations;
+import org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync;
+import org.apache.cloudstack.storage.command.AttachCommand;
+import org.apache.cloudstack.storage.command.DettachCommand;
 import org.apache.cloudstack.utils.security.DigestHelper;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
@@ -81,6 +87,7 @@ import com.cloud.agent.api.StartAnswer;
 import com.cloud.agent.api.StartCommand;
 import com.cloud.agent.api.StopAnswer;
 import com.cloud.agent.api.StopCommand;
+import com.cloud.agent.api.to.DiskTO;
 import com.cloud.agent.api.to.NicTO;
 import com.cloud.agent.api.to.VirtualMachineTO;
 import com.cloud.host.Host;
@@ -91,6 +98,11 @@ import com.cloud.hypervisor.Hypervisor;
 import com.cloud.hypervisor.HypervisorGuru;
 import com.cloud.hypervisor.HypervisorGuruManager;
 import com.cloud.serializer.GsonHelper;
+import com.cloud.storage.Storage;
+import com.cloud.storage.VMTemplateVO;
+import com.cloud.storage.Volume;
+import com.cloud.storage.dao.VMTemplateDao;
+import com.cloud.template.TemplateManager;
 import com.cloud.utils.FileUtil;
 import com.cloud.utils.Pair;
 import com.cloud.utils.PropertiesUtil;
@@ -144,6 +156,18 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     @Inject
     ExtensionHelper extensionHelper;
 
+    @Inject
+    ExternalIsoLibrary isoLibrary;
+
+    @Inject
+    ExternalVolumeSync volumeSync;
+
+    @Inject
+    ExternalInstanceLock instanceLock;
+
+    @Inject
+    VMTemplateDao templateDao;
+
     private static final AtomicReference<Properties> propertiesRef = new AtomicReference<>();
     private String extensionsDirectory;
     private String extensionsDataDirectory;
@@ -177,6 +201,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             case "DeleteSnapshot": return "delete_snapshot";
             case "start": case "stop": case "reboot": case "setha": case "scale": case "plugnic": case "unplugnic": return action;
             case "adddisk": case "resizedisk": case "deletedisk": case "movedisk": return action;
+            case "attachiso": case "detachiso": return action;
             case "status": case "getconfig": case "getipaddress": case "ListSnapshots": return "";
             default: throw new IllegalArgumentException("Native adoption does not support action: " + action);
         }
@@ -545,7 +570,6 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             return new StartAnswer(cmd, getExtensionConfigureError(extensionName, hostName));
         }
         VirtualMachineTO virtualMachineTO = cmd.getVirtualMachine();
-        Map<String, Object> accessDetails = loadAccessDetails(cmd.getExternalDetails(), virtualMachineTO);
         String vmUUID = virtualMachineTO.getUuid();
 
         logger.debug(String.format("Executing StartCommand in the external provisioner for VM %s", vmUUID));
@@ -554,6 +578,26 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         boolean isDeploy = (deployvm != null && Boolean.parseBoolean((String)deployvm));
         String operation = isDeploy ? "Deploying" : "Starting";
         try {
+            HostVO host = hostDao.findByGuid(hostName);
+            VMInstanceVO vm = vmInstanceDao.findByUuid(vmUUID);
+            List<Map<String, Object>> cdroms = null;
+            if (isoLibrary != null && host != null && vm != null && isoLibrary.supported(host.getClusterId())) {
+                // As on any hypervisor, a start gives the instance the CD drives CloudStack records for it.
+                cdroms = isoLibrary.drives(host, virtualMachineTO.getDisks(), clusterAction(host, extensionName, extensionPath));
+                VMTemplateVO image = isDeploy ? templateDao.findByIdIncludingRemoved(vm.getTemplateId()) : null;
+                if (image != null && image.getFormat() == Storage.ImageFormat.ISO) {
+                    // An ISO supplies none of what a template does to create the instance from.
+                    Map<String, Map<String, String>> details = cmd.getExternalDetails();
+                    Map<String, String> vmDetails = details.get(ApiConstants.VIRTUAL_MACHINE) == null ? new HashMap<>()
+                            : new HashMap<>(details.get(ApiConstants.VIRTUAL_MACHINE));
+                    vmDetails.putAll(isoLibrary.deployment(host, vm));
+                    details.put(ApiConstants.VIRTUAL_MACHINE, vmDetails);
+                }
+            }
+            Map<String, Object> accessDetails = loadAccessDetails(cmd.getExternalDetails(), virtualMachineTO);
+            if (cdroms != null) {
+                accessDetails.put("cdroms", cdroms);
+            }
             Pair<Boolean, String> result = executeStartCommandOnExternalSystem(extensionName, isDeploy,
                     extensionPath, vmUUID, accessDetails, cmd.getWait());
 
@@ -563,6 +607,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                 return new StartAnswer(cmd, result.second());
             }
             logger.debug(String.format("%s VM %s on the external system", operation, vmUUID));
+            if (isDeploy && volumeSync != null && host != null && vm != null && host.getClusterId() != null) {
+                volumeSync.recordCreated(vm, host.getClusterId(), result.second());
+            }
             return new StartAnswer(cmd);
 
         } catch (CloudRuntimeException e) {
@@ -894,6 +941,82 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         Pair<Boolean, String> result = changeInstanceNic(hostGuid, extensionName, extensionRelativePath,
                 cmd.getVmName(), cmd.getNic(), "unplugnic", cmd.getWait());
         return new UnPlugNicAnswer(cmd, result.first(), result.second());
+    }
+
+    /** Runs an action of the extension that concerns the host's cluster and no instance. */
+    protected ExternalIsoLibrary.Runner clusterAction(HostVO host, String extensionName, String extensionPath) {
+        return (action, parameters, wait) -> {
+            Map<String, Object> payload = loadAccessDetails(extensionsManager.getExternalAccessDetails(host, null), null);
+            payload.put(ApiConstants.ACTION, action);
+            payload.put(ApiConstants.PARAMETERS, parameters);
+            return executeExternalCommand(extensionName, action, payload, wait,
+                    String.format("Failed to execute '%s' on external system", action), extensionPath);
+        };
+    }
+
+    @Override
+    public Answer attachInstanceIso(String hostGuid, String extensionName, String extensionRelativePath, AttachCommand cmd) {
+        Pair<Boolean, String> result = changeInstanceIso(hostGuid, extensionName, extensionRelativePath, cmd.getVmName(), cmd.getDisk(), true, cmd.getWait());
+        return new Answer(cmd, result.first(), result.second());
+    }
+
+    @Override
+    public Answer detachInstanceIso(String hostGuid, String extensionName, String extensionRelativePath, DettachCommand cmd) {
+        Pair<Boolean, String> result = changeInstanceIso(hostGuid, extensionName, extensionRelativePath, cmd.getVmName(), cmd.getDisk(), false, cmd.getWait());
+        return new Answer(cmd, result.first(), result.second());
+    }
+
+    /**
+     * The stock ISO commands are only sent for a running instance; a stopped one has its drives set at its next
+     * start. Attach loads the drive CloudStack chose when it is empty, else the first empty drive: a drive that
+     * holds a disc is never taken, as the disc may be one CloudStack does not record. Detach empties whichever
+     * drive holds the ISO. A refusal carries the extension's reason.
+     */
+    protected Pair<Boolean, String> changeInstanceIso(String hostGuid, String extensionName, String extensionRelativePath,
+            String instanceName, DiskTO disk, boolean attach, int wait) {
+        String extensionPath = getExtensionCheckedPath(extensionName, extensionRelativePath);
+        if (StringUtils.isEmpty(extensionPath)) {
+            return new Pair<>(false, getExtensionConfigureError(extensionName, hostGuid));
+        }
+        HostVO host = hostDao.findByGuid(hostGuid);
+        UserVmVO userVm = getUserVmByInstanceName(instanceName);
+        if (ObjectUtils.anyNull(host, userVm, disk, isoLibrary) || disk.getType() != Volume.Type.ISO || disk.getDiskSeq() == null) {
+            return new Pair<>(false, "Host, instance or ISO not found");
+        }
+        if (!isoLibrary.supported(host.getClusterId())) {
+            return new Pair<>(false, "The instance's extension does not support ISOs.");
+        }
+        if (userVm.getState() != VirtualMachine.State.Running || userVm.getHostId() == null || userVm.getHostId() != host.getId()) {
+            return new Pair<>(false, "The instance is not running on this host.");
+        }
+        long drive = disk.getDiskSeq() - TemplateManager.CDROM_PRIMARY_DEVICE_SEQ;
+        if (drive < 0 || drive > 3) {
+            return new Pair<>(false, "The instance has no such CD drive.");
+        }
+        try {
+            VMTemplateVO iso = isoLibrary.iso(disk.getData());
+            if (iso == null) {
+                return new Pair<>(false, "Host, instance or ISO not found");
+            }
+            return instanceLock.hold(userVm.getId(), 1, () -> {
+                String volume = attach ? isoLibrary.ensure(host, iso, clusterAction(host, extensionName, extensionPath)) : isoLibrary.volume(host, iso);
+                VirtualMachineTO vmTO = getVirtualMachineTO(userVm);
+                Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
+                access.put(ApiConstants.VIRTUAL_MACHINE, vmTO.getExternalDetails());
+                Map<String, Object> payload = loadAccessDetails(access, vmTO);
+                Map<String, Object> parameters = new HashMap<>();
+                parameters.put("volume", volume);
+                if (attach) {
+                    parameters.put("drive", drive);
+                }
+                payload.put(ApiConstants.PARAMETERS, parameters);
+                Pair<Boolean, String> result = executeExternalCommand(extensionName, attach ? "attachiso" : "detachiso", payload, wait,
+                        "Failed to change a CD drive on the external system", extensionPath);
+                return result.first() ? result : new Pair<>(false, ExternalVolumeOperations.reason(result.second()));
+            });
+        } catch (CloudRuntimeException e) {
+            return new Pair<>(false, e.getMessage());
+        }
     }
 
     protected Pair<Boolean, String> changeInstanceNic(String hostGuid, String extensionName, String extensionRelativePath,

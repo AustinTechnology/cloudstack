@@ -30,7 +30,7 @@ const isoMaxCount = (record) => record.isomaxcount != null
   ? record.isomaxcount
   : (record.hypervisor === 'KVM' ? 2 : 1)
 const isoActionAvailable = (record) =>
-  record.hypervisor !== 'External' && ['Running', 'Stopped'].includes(record.state) && record.vmtype !== 'sharedfsvm'
+  (record.hypervisor !== 'External' || record.instanceisosupported === true) && ['Running', 'Stopped'].includes(record.state) && record.vmtype !== 'sharedfsvm'
 
 export default {
   name: 'compute',
