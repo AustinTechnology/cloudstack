@@ -53,12 +53,12 @@ These are all Proxmox guests, including the few that have no CloudStack record.
 
 ### Model
 
-- **Pool.** One CloudStack primary storage pool per Proxmox storage that holds guest images, registered for the External cluster under a new storage provider in the External plugin. Shared storages (RBD) are cluster-scoped; node-local ones (LVM-thin, directory) are host-scoped. The pool's path is the Proxmox storage name.
+- **Pool.** One zone-wide CloudStack primary storage pool per Proxmox storage that holds guest images, under a new storage provider in the External plugin. Every Proxmox cluster in the zone that reaches the same storage shares the one pool (decided). The KVM pools on the same Ceph pools stay separate pools. Node-local storage is not registered. The pool's path is the Proxmox storage name.
 - **Volume.** One volume per data-bearing disk. Its path is the Proxmox volume ID exactly as the guest's config references it; a volume detail holds the Proxmox slot (`scsi1`). The first disk in the boot order is the root volume; the rest are data disks.
 - **Not modelled.** EFI disks, TPM state, CD drives, unused disks and passthrough devices stay with Proxmox. The refresh reports them.
-- **Identity.** Cluster + storage + volume ID as referenced by the guest's config. Ownership is never inferred from the VMID inside an image name (see the hazard above).
+- **Identity.** Pool + volume ID as referenced by the guest's config. Clusters that share a pool share one set of image names, as they do in Ceph. Ownership is never inferred from the VMID inside an image name (see the hazard above).
 - **Offerings and accounting.** Every volume has a disk offering, and creating, growing or removing one writes the usual usage event and updates the account's volume count and primary storage total, the same way the step 7 refresh handles CPU and RAM.
-- **Capacity.** Read from Proxmox for display. The same Ceph pools are already counted by the KVM pools, so zone-wide capacity totals will count them twice.
+- **Capacity.** Read from Proxmox for display. Each Ceph pool is counted once for Proxmox and once by its KVM pool, so zone-wide capacity totals count it twice.
 
 ### Who writes what
 
@@ -149,7 +149,11 @@ The lab has neither Ceph nor a KVM host, so this cannot be tried there as it sta
 Setting up a cluster:
 
 1. Declare `instancestoragesupported=true` on the extension. Without it nothing below is accepted.
-2. Register each storage: `createStoragePool` with `provider=External`, `scope=cluster`, `hypervisor=External`, `url=external://<Proxmox storage name>` and a tag. The storage must exist on the cluster, be enabled and active, hold guest disks, and be shared; node-local storage is refused. The same storage on two clusters is two pools.
+2. Register each storage once for the zone: `createStoragePool` with `provider=External`, `scope=zone`, `hypervisor=External`, `url=external://<Proxmox storage name>` and a tag. Every External cluster in the zone is asked. On each cluster that has the storage it must be enabled, active, shared and hold guest disks, and it must be the same storage on all of them; otherwise nothing is registered.
+
+"The same storage" is decided by what is behind it, not its name: for Ceph the pool, data pool and namespace, with at least one monitor in common (production's two clusters list different monitors for the same Ceph); for NFS the server and export. Storage only one cluster can reach never matches another cluster's. A cluster added later is compared the first time one of its guests is refreshed, and its disks are left out and reported if its storage of that name is something else.
+
+A pool is removed by putting it into maintenance mode and deleting it. Maintenance mode is refused while the pool records any volume, and moves or stops nothing.
 3. Create one custom-size disk offering carrying the same tag. A storage whose tag matches no offering, or more than one, has its disks reported and not recorded.
 
 The tag of an External pool must not be on any KVM pool. A volume created loose from a tier's offering is only a record until phase 2 gives it somewhere to go, and a shared tag would let CloudStack place it on KVM storage.
@@ -166,9 +170,9 @@ Removing the instance removes its volume records, counts and usage with it. An a
 
 The ordinary volume API on these volumes: detach, extract, snapshot and snapshot schedule are refused before anything is recorded; resize, migrate, delete, attach elsewhere and reinstall were already refused. Making a template from the root disk of a stopped guest fails at the host and leaves nothing behind.
 
-Verified in the lab (`storage-v5`, 733 unit tests and 45 extension tests passing): registration and its three refusals; dry run, import, repeat with no change; a disk grown at Proxmox, running and stopped; an adopted guest expunged with both disks kept at Proxmox and re-adopted into an account limited to one volume and 1 GiB, which recorded two volumes and 5 GiB and said so; a deployed guest imported then destroyed with its disk; destroy and recover; stop, start and reboot of guests with volumes; the periodic worker importing the guests not yet done, once; capacity and used bytes following Proxmox every minute.
+Verified in the lab (`storage-v8`, 736 unit tests and 45 extension tests passing), all of it on a zone-wide pool: registration and its four refusals (cluster scope, node-local storage, unknown storage, duplicate); a cluster forgotten by the pool compared again and remembered on the next refresh; a pool whose record was changed to a different storage refusing to record that cluster's disks and leaving the existing volumes alone; removing an empty pool through maintenance mode; dry run, import, repeat with no change; a disk grown at Proxmox, running and stopped; an adopted guest expunged with both disks kept at Proxmox and re-adopted into an account limited to one volume and 1 GiB, which recorded two volumes and 5 GiB and said so; a deployed guest imported then destroyed with its disk; destroy and recover; stop, start and reboot of guests with volumes; the periodic worker importing the guests not yet done, once; capacity and used bytes following Proxmox every minute.
 
-Not tested: Ceph (the lab storage is NFS), a guest with an EFI or TPM disk, a disk on an unregistered storage alongside registered ones on a real guest, and anything at production scale.
+Not tested: two Proxmox clusters sharing one pool (the lab has one cluster; the sharing rules are covered by unit tests only, and production's own storage definitions were read and satisfy them), Ceph (the lab storage is NFS), a guest with an EFI or TPM disk, a disk on an unregistered storage alongside registered ones on a real guest, and anything at production scale.
 
 ## Risks
 
@@ -178,6 +182,8 @@ Not tested: Ceph (the lab storage is NFS), a guest with an EFI or TPM disk, a di
 - **The lab has no Ceph.** Its storages are NFS and a local directory. RBD behaviour (erasure-coded data pools, move between pools) would first be exercised in production unless the lab gets a Ceph pool.
 
 ## Decided (14 Nov 2026)
+
+0. **Pools.** One Proxmox pool per storage, shared by all Proxmox clusters. KVM keeps its own pools on the same Ceph pools. Moving a guest to KVM later is then a rewrite of each volume's pool and path, with no copy of data.
 
 1. **Usage and limits.** Imported disks produce usage records and count against account limits from the day they are imported.
 2. **Disk offerings.** One custom-size offering per storage tier.

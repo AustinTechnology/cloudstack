@@ -124,7 +124,14 @@ public class ExternalVolumeSyncTest {
         when(pool.getPath()).thenReturn("ssd");
         when(pool.getStorageProviderName()).thenReturn("External");
         when(pool.getPoolType()).thenReturn(StoragePoolType.RBD);
-        when(sync.poolDao.listPoolsByCluster(7L)).thenReturn(Collections.singletonList(pool));
+        when(pool.getName()).thenReturn("Proxmox SSD");
+        sync.clusterDao = mock(com.cloud.dc.dao.ClusterDao.class);
+        com.cloud.dc.ClusterVO cluster = mock(com.cloud.dc.ClusterVO.class);
+        when(cluster.getDataCenterId()).thenReturn(3L);
+        when(sync.clusterDao.findById(7L)).thenReturn(cluster);
+        when(sync.poolDao.listByDataCenterId(3L)).thenReturn(Collections.singletonList(pool));
+        sync.inventory = mock(ExternalStorageInventory.class);
+        when(sync.inventory.reaches(eq(pool), eq(7L), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(true);
         when(sync.poolDao.searchForStoragePoolTags(5L)).thenReturn(Arrays.asList("ssd-tier", "other"));
         offering = offering("Standard SSD", "ssd-tier");
         when(sync.diskOfferingDao.listAllActiveAndNonComputeDiskOfferings()).thenReturn(Collections.singletonList(offering));
@@ -263,13 +270,110 @@ public class ExternalVolumeSyncTest {
     }
 
     @Test
+    public void aClusterWhoseStorageOfThatNameIsSomethingElseHasItsDisksLeftOut() {
+        when(sync.inventory.reaches(pool, 7L, true)).thenReturn(false);
+
+        assertTrue(sync.sync(vm, 7L, snapshot(ROOT_DISK, DATA_DISK), false, unresolved).isEmpty());
+
+        assertEquals(1, unresolved.size());
+        assertTrue(unresolved.get(0), unresolved.get(0).contains("storage ssd of this cluster is not the storage registered as Proxmox SSD"));
+        verify(sync.inventory).reaches(pool, 7L, true);
+        verify(sync.volumeManager, never()).importVolume(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+        // Volumes already recorded are left as they are, and not called missing.
+        VolumeVO root = recorded(70L, Volume.Type.ROOT, "ssd:vm-110-disk-0", 32 * GIB, 0L, 10L);
+        when(sync.volumeDao.findByInstance(10L)).thenReturn(Collections.singletonList(root));
+        when(sync.inventory.reaches(pool, 7L, false)).thenThrow(new RuntimeException("no host"));
+        unresolved.clear();
+        assertTrue(sync.sync(vm, 7L, snapshot(ROOT_DISK), true, unresolved).isEmpty());
+        assertEquals(unresolved.toString(), 1, unresolved.size());
+        assertTrue(unresolved.get(0), unresolved.get(0).contains("could not be compared"));
+        verify(sync.volumeDao, never()).update(anyLong(), any());
+    }
+
+    @Test
+    public void clustersMeanTheSameStorageByBackingAndForCephAMonitorInCommon() {
+        java.util.Set<String> none = Collections.emptySet();
+        java.util.Set<String> p2 = new java.util.HashSet<>(Arrays.asList("10.0.0.44", "10.0.0.32", "10.0.0.85"));
+        java.util.Set<String> p3 = new java.util.HashSet<>(Arrays.asList("10.0.0.32", "10.0.0.67"));
+        java.util.Set<String> elsewhere = Collections.singleton("192.168.1.1");
+        assertTrue(ExternalStorageInventory.same("rbd/ssd.meta/ssd/", p2, "rbd/ssd.meta/ssd/", p3));
+        assertFalse(ExternalStorageInventory.same("rbd/ssd.meta/ssd/", p2, "rbd/ssd.meta/ssd/", elsewhere));
+        assertFalse(ExternalStorageInventory.same("rbd/ssd.meta/ssd/", p2, "rbd/ssd.meta/other/", p3));
+        assertFalse(ExternalStorageInventory.same("rbd/ssd.meta/ssd/", p2, "rbd/ssd.meta/ssd/", none));
+        assertTrue(ExternalStorageInventory.same("nfs/10.0.0.9/srv/vm", none, "nfs/10.0.0.9/srv/vm", none));
+        assertFalse(ExternalStorageInventory.same("lvmthin/@P2/local-lvm", none, "lvmthin/@P3/local-lvm", none));
+    }
+
+    @Test
+    public void oneZonePoolIsRegisteredForEveryClusterThatReachesTheStorage() {
+        ExternalPrimaryDataStoreLifeCycle lifeCycle = new ExternalPrimaryDataStoreLifeCycle();
+        lifeCycle.zoneDao = mock(com.cloud.dc.dao.DataCenterDao.class);
+        lifeCycle.poolDao = mock(PrimaryDataStoreDao.class);
+        lifeCycle.inventory = mock(ExternalStorageInventory.class);
+        lifeCycle.dataStoreHelper = mock(org.apache.cloudstack.storage.volume.datastore.PrimaryDataStoreHelper.class);
+        com.cloud.dc.DataCenterVO zone = mock(com.cloud.dc.DataCenterVO.class);
+        when(zone.getUuid()).thenReturn("zone-uuid");
+        when(lifeCycle.zoneDao.findById(3L)).thenReturn(zone);
+        when(lifeCycle.poolDao.listByDataCenterId(3L)).thenReturn(Collections.emptyList());
+        com.cloud.dc.ClusterVO p2 = mock(com.cloud.dc.ClusterVO.class);
+        com.cloud.dc.ClusterVO p3 = mock(com.cloud.dc.ClusterVO.class);
+        when(p2.getUuid()).thenReturn("c2");
+        when(p2.getId()).thenReturn(2L);
+        when(p2.getName()).thenReturn("P2");
+        when(p3.getUuid()).thenReturn("c3");
+        when(p3.getId()).thenReturn(3L);
+        when(p3.getName()).thenReturn("P3");
+        when(lifeCycle.inventory.providerCluster(2L)).thenReturn("cluster-a");
+        when(lifeCycle.inventory.providerCluster(3L)).thenReturn("cluster-b");
+        java.util.Map<com.cloud.dc.ClusterVO, ExternalStorageInventory.Storage> found = new java.util.LinkedHashMap<>();
+        found.put(p2, new ExternalStorageInventory.Storage("ssd", "rbd", true, true, true, 1000, 250, "rbd/ssd.meta/ssd/", new java.util.TreeSet<>(Arrays.asList("10.0.0.44", "10.0.0.32"))));
+        found.put(p3, new ExternalStorageInventory.Storage("ssd", "rbd", true, true, true, 1000, 250, "rbd/ssd.meta/ssd/", new java.util.TreeSet<>(Arrays.asList("10.0.0.32", "10.0.0.67"))));
+        when(lifeCycle.inventory.findInZone(3L, "ssd")).thenReturn(found);
+        java.util.Map<String, Object> info = new java.util.HashMap<>();
+        info.put("zoneId", 3L);
+        info.put("hypervisorType", com.cloud.hypervisor.Hypervisor.HypervisorType.External);
+        info.put("url", "external://ssd");
+        info.put("name", "Proxmox SSD");
+
+        lifeCycle.initialize(info);
+
+        org.mockito.ArgumentCaptor<org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreParameters> created =
+                org.mockito.ArgumentCaptor.forClass(org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreParameters.class);
+        verify(lifeCycle.dataStoreHelper).createPrimaryDataStore(created.capture());
+        assertEquals("ssd", created.getValue().getPath());
+        assertNull(created.getValue().getClusterId());
+        assertEquals(StoragePoolType.RBD, created.getValue().getType());
+        java.util.Map<String, String> details = created.getValue().getDetails();
+        assertEquals("rbd/ssd.meta/ssd/", details.get(ExternalStorageInventory.BACKING));
+        assertEquals("10.0.0.32,10.0.0.44,10.0.0.67", details.get(ExternalStorageInventory.MONITORS));
+        assertEquals("cluster-a", details.get(ExternalStorageInventory.CLUSTER + "c2"));
+        assertEquals("cluster-b", details.get(ExternalStorageInventory.CLUSTER + "c3"));
+
+        // The same name for something else on one cluster, a cluster scope, or no cluster with it: nothing is registered.
+        found.put(p3, new ExternalStorageInventory.Storage("ssd", "rbd", true, true, true, 1000, 250, "rbd/ssd.meta/ssd/", Collections.singleton("192.168.1.1")));
+        assertThrows(InvalidParameterValueException.class, () -> lifeCycle.initialize(info));
+        found.put(p3, new ExternalStorageInventory.Storage("ssd", "lvmthin", false, true, true, 1000, 250, "lvmthin/@p3/ssd", Collections.emptySet()));
+        assertThrows(InvalidParameterValueException.class, () -> lifeCycle.initialize(info));
+        found.clear();
+        assertThrows(InvalidParameterValueException.class, () -> lifeCycle.initialize(info));
+        info.put("clusterId", 2L);
+        assertThrows(InvalidParameterValueException.class, () -> lifeCycle.initialize(info));
+        verify(lifeCycle.dataStoreHelper, org.mockito.Mockito.times(1)).createPrimaryDataStore(any());
+    }
+
+    @Test
     public void storageInventoryIsParsedStrictlyAndBoundToItsCluster() {
-        String ok = "{\"status\":\"success\",\"cluster\":\"P2\",\"storages\":[{\"storage\":\"ssd\",\"type\":\"rbd\",\"shared\":true,\"enabled\":true,\"active\":true,\"total\":1000,\"used\":250}]}";
+        String ok = "{\"status\":\"success\",\"cluster\":\"P2\",\"storages\":[{\"storage\":\"ssd\",\"type\":\"rbd\",\"shared\":true,\"enabled\":true,\"active\":true,\"total\":1000,\"used\":250,"
+                + "\"backing\":\"rbd/ssd.meta/ssd/\",\"monitors\":[\"10.0.0.2\",\"10.0.0.1\"]}]}";
         ExternalStorageInventory.Storage storage = ExternalStorageInventory.parse(ok, "P2").get(0);
         assertEquals("ssd", storage.name);
         assertEquals(1000L, storage.totalBytes);
         assertTrue(storage.shared);
+        assertEquals("rbd/ssd.meta/ssd/", storage.backing);
+        assertEquals("[10.0.0.1, 10.0.0.2]", storage.monitors.toString());
         for (String bad : new String[] {ok.replace("\"P2\"", "\"P3\""), ok.replace("\"shared\":true", "\"shared\":1"), ok.replace("1000", "-1"),
+                ok.replace("rbd/ssd.meta/ssd/", ""), ok.replace("\"10.0.0.2\"", "7"), ok.replace(",\"monitors\":[\"10.0.0.2\",\"10.0.0.1\"]", ""),
                 ok.replace("\"ssd\"", "\"s s\""), ok.replace("success", "error"), "not json", null}) {
             assertThrows(InvalidParameterValueException.class, () -> ExternalStorageInventory.parse(bad, "P2"));
         }

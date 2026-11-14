@@ -445,7 +445,7 @@ public class StorageManagerImpl extends ManagerBase implements StorageManager, C
     private final Map<String, HypervisorHostListener> hostListeners = new HashMap<>();
 
     private final Set<HypervisorType> zoneWidePoolSupportedHypervisorTypes = Sets.newHashSet(HypervisorType.KVM, HypervisorType.VMware,
-            HypervisorType.Hyperv, HypervisorType.LXC, HypervisorType.Any, HypervisorType.Simulator);
+            HypervisorType.Hyperv, HypervisorType.LXC, HypervisorType.Any, HypervisorType.Simulator, HypervisorType.External);
 
     private static final String NFS_MOUNT_OPTIONS_INCORRECT = "An incorrect mount option was specified";
 

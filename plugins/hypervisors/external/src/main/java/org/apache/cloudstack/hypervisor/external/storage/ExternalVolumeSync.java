@@ -91,6 +91,8 @@ public class ExternalVolumeSync {
     @Inject VolumeDao volumeDao;
     @Inject VolumeDetailsDao volumeDetailsDao;
     @Inject PrimaryDataStoreDao poolDao;
+    @Inject com.cloud.dc.dao.ClusterDao clusterDao;
+    @Inject ExternalStorageInventory inventory;
     @Inject DiskOfferingDao diskOfferingDao;
     @Inject VMTemplateDao templateDao;
     @Inject VolumeOrchestrationService volumeManager;
@@ -114,11 +116,15 @@ public class ExternalVolumeSync {
     /** @param owner the account the volumes are, or would be, counted against; null when it is not known */
     public List<Change> sync(VMInstanceVO vm, Account owner, long clusterId, ExternalVmConfiguration snapshot, boolean dryRun, List<String> unresolved) {
         Map<String, StoragePoolVO> pools = new HashMap<>();
-        for (StoragePoolVO pool : poolDao.listPoolsByCluster(clusterId)) {
+        for (StoragePoolVO pool : poolDao.listByDataCenterId(clusterDao.findById(clusterId).getDataCenterId())) {
             if (ExternalPrimaryDataStoreProvider.NAME.equals(pool.getStorageProviderName()) && pool.getRemoved() == null) {
                 pools.put(pool.getPath(), pool);
             }
         }
+        // A pool is shared by every cluster that reaches its storage. Whether this cluster's storage of that
+        // name is that storage is asked once for each pool.
+        Map<String, Boolean> reached = new HashMap<>();
+        Set<String> notCompared = new HashSet<>();
         if (vm == null && !dryRun) {
             throw new IllegalArgumentException("Volumes can only be recorded for a recorded instance");
         }
@@ -149,6 +155,22 @@ public class ExternalVolumeSync {
             StoragePoolVO pool = pools.get(disk.storage);
             if (pool == null) {
                 unresolved.add("disk " + disk.device + " is on storage " + disk.storage + ", which is not registered; not recorded");
+                continue;
+            }
+            if (!reached.containsKey(disk.storage)) {
+                Boolean same = null;
+                try {
+                    same = inventory.reaches(pool, clusterId, !dryRun);
+                } catch (RuntimeException e) {
+                    unresolved.add("storage " + disk.storage + " could not be compared with the registered storage; its disks are not recorded");
+                }
+                if (Boolean.FALSE.equals(same)) {
+                    unresolved.add("storage " + disk.storage + " of this cluster is not the storage registered as " + pool.getName() + "; its disks are not recorded");
+                }
+                reached.put(disk.storage, Boolean.TRUE.equals(same));
+            }
+            if (!reached.get(disk.storage)) {
+                notCompared.add(id);
                 continue;
             }
             if (disk.sizeBytes == null) {
@@ -197,7 +219,7 @@ public class ExternalVolumeSync {
             }
         }
         for (VolumeVO volume : recorded) {
-            if (!seen.contains(volume.getId())) {
+            if (!seen.contains(volume.getId()) && !notCompared.contains(volume.getPath())) {
                 unresolved.add("volume " + volume.getUuid() + " (" + volume.getPath() + ") is not in the provider configuration; report-only");
             }
         }

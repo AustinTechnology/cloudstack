@@ -32,12 +32,15 @@ import org.apache.cloudstack.engine.subsystem.api.storage.TemplateInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.storage.command.CommandResult;
+import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
+import org.apache.cloudstack.storage.datastore.db.StoragePoolVO;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.cloud.agent.api.to.DataStoreTO;
 import com.cloud.agent.api.to.DataTO;
 import com.cloud.host.Host;
+import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.storage.Storage.StoragePoolType;
 import com.cloud.storage.StoragePool;
 import com.cloud.storage.Volume;
@@ -53,6 +56,7 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     protected Logger logger = LogManager.getLogger(getClass());
 
     @Inject ExternalStorageInventory inventory;
+    @Inject PrimaryDataStoreDao poolDao;
 
     @Override
     public Map<String, String> getCapabilities() {
@@ -170,8 +174,8 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     @Override
     public Pair<Long, Long> getStorageStats(StoragePool storagePool) {
         try {
-            ExternalStorageInventory.Storage storage = storagePool.getClusterId() == null ? null
-                    : inventory.find(storagePool.getClusterId(), storagePool.getPath());
+            StoragePoolVO pool = poolDao.findById(storagePool.getId());
+            ExternalStorageInventory.Storage storage = pool == null ? null : inventory.findAny(pool);
             return storage == null ? null : new Pair<>(storage.totalBytes, storage.usedBytes);
         } catch (RuntimeException e) {
             logger.debug("No storage statistics for {}: {}", storagePool, e.getMessage());
@@ -191,7 +195,8 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canHostAccessStoragePool(Host host, StoragePool pool) {
-        return pool.getClusterId() != null && pool.getClusterId().equals(host.getClusterId());
+        return host.getHypervisorType() == HypervisorType.External && host.getClusterId() != null && host.getDataCenterId() == pool.getDataCenterId()
+                && inventory.reaches(poolDao.findById(pool.getId()), host.getClusterId(), false);
     }
 
     @Override

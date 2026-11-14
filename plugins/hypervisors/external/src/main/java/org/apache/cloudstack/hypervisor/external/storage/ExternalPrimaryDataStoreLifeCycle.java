@@ -19,6 +19,8 @@ package org.apache.cloudstack.hypervisor.external.storage;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import javax.inject.Inject;
@@ -37,15 +39,13 @@ import org.apache.logging.log4j.Logger;
 
 import com.cloud.agent.api.StoragePoolInfo;
 import com.cloud.dc.ClusterVO;
-import com.cloud.dc.dao.ClusterDao;
+import com.cloud.dc.DataCenterVO;
+import com.cloud.dc.dao.DataCenterDao;
 import com.cloud.exception.InvalidParameterValueException;
-import com.cloud.host.HostVO;
-import com.cloud.host.Status;
-import com.cloud.host.dao.HostDao;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.storage.Storage.StoragePoolType;
-import com.cloud.storage.StorageManager;
 import com.cloud.storage.StoragePool;
+import com.cloud.storage.dao.VolumeDao;
 import com.cloud.utils.exception.CloudRuntimeException;
 
 /**
@@ -56,10 +56,9 @@ public class ExternalPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCy
     protected Logger logger = LogManager.getLogger(getClass());
 
     @Inject PrimaryDataStoreHelper dataStoreHelper;
-    @Inject ClusterDao clusterDao;
-    @Inject HostDao hostDao;
+    @Inject DataCenterDao zoneDao;
+    @Inject VolumeDao volumeDao;
     @Inject PrimaryDataStoreDao poolDao;
-    @Inject StorageManager storageManager;
     @Inject ExternalStorageInventory inventory;
 
     static String storageName(String url) {
@@ -85,38 +84,51 @@ public class ExternalPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCy
     @Override
     @SuppressWarnings("unchecked")
     public DataStore initialize(Map<String, Object> info) {
-        Long clusterId = (Long) info.get("clusterId");
-        ClusterVO cluster = clusterId == null ? null : clusterDao.findById(clusterId);
-        if (cluster == null || cluster.getHypervisorType() != HypervisorType.External) {
-            throw new InvalidParameterValueException("External storage is registered for one External cluster (scope CLUSTER)");
+        Long zoneId = (Long) info.get("zoneId");
+        DataCenterVO zone = zoneId == null ? null : zoneDao.findById(zoneId);
+        if (zone == null || info.get("clusterId") != null || info.get("hypervisorType") != HypervisorType.External) {
+            throw new InvalidParameterValueException("External storage is registered once for a zone (scope ZONE, hypervisor External)");
         }
         String storageName = storageName((String) info.get("url"));
-        for (StoragePoolVO pool : poolDao.listPoolsByCluster(clusterId)) {
-            if (ExternalPrimaryDataStoreProvider.NAME.equals(pool.getStorageProviderName()) && storageName.equals(pool.getPath())) {
-                throw new InvalidParameterValueException("That storage is already registered for the cluster");
+        for (StoragePoolVO pool : poolDao.listByDataCenterId(zoneId)) {
+            if (ExternalPrimaryDataStoreProvider.NAME.equals(pool.getStorageProviderName()) && storageName.equals(pool.getPath()) && pool.getRemoved() == null) {
+                throw new InvalidParameterValueException("That storage is already registered for the zone");
             }
         }
-        ExternalStorageInventory.Storage storage = inventory.find(clusterId, storageName);
-        if (storage == null) {
-            throw new InvalidParameterValueException("The cluster has no storage of that name that holds instance disks");
+        // One pool for every cluster that reaches the storage. Clusters that name something else the same way
+        // would put two different sets of disks in one pool, so that is refused.
+        Map<ClusterVO, ExternalStorageInventory.Storage> found = inventory.findInZone(zoneId, storageName);
+        if (found.isEmpty()) {
+            throw new InvalidParameterValueException("No External cluster in the zone has a storage of that name that holds instance disks");
         }
-        if (!storage.enabled || !storage.active) {
-            throw new InvalidParameterValueException("The storage is not enabled and active at the provider");
-        }
-        if (!storage.shared) {
-            throw new InvalidParameterValueException("Storage that is local to one host is not supported");
-        }
+        ExternalStorageInventory.Storage storage = found.values().iterator().next();
+        Set<String> monitors = new TreeSet<>();
         Map<String, String> details = info.get("details") == null ? new HashMap<>() : new HashMap<>((Map<String, String>) info.get("details"));
+        for (Map.Entry<ClusterVO, ExternalStorageInventory.Storage> entry : found.entrySet()) {
+            ExternalStorageInventory.Storage other = entry.getValue();
+            String where = " on cluster " + entry.getKey().getName();
+            if (!other.enabled || !other.active) {
+                throw new InvalidParameterValueException("The storage is not enabled and active at the provider" + where);
+            }
+            if (!other.shared) {
+                throw new InvalidParameterValueException("Storage that is local to one host is not supported; it is local" + where);
+            }
+            if (!other.type.equals(storage.type) || !ExternalStorageInventory.same(storage.backing, storage.monitors, other.backing, other.monitors)) {
+                throw new InvalidParameterValueException("The clusters of the zone do not mean the same storage by that name; it differs" + where);
+            }
+            monitors.addAll(other.monitors);
+            details.put(ExternalStorageInventory.CLUSTER + entry.getKey().getUuid(), inventory.providerCluster(entry.getKey().getId()));
+        }
         details.put("externalStorageType", storage.type);
+        details.put(ExternalStorageInventory.BACKING, storage.backing);
+        details.put(ExternalStorageInventory.MONITORS, String.join(",", monitors));
         PrimaryDataStoreParameters parameters = new PrimaryDataStoreParameters();
-        parameters.setHost(inventory.providerCluster(clusterId));
+        parameters.setHost("external");
         parameters.setPort(0);
         parameters.setPath(storageName);
         parameters.setType(poolType(storage.type));
-        parameters.setUuid(UUID.nameUUIDFromBytes(("external-storage:" + cluster.getUuid() + ":" + storageName).getBytes(StandardCharsets.UTF_8)).toString());
-        parameters.setZoneId((Long) info.get("zoneId"));
-        parameters.setPodId(cluster.getPodId());
-        parameters.setClusterId(clusterId);
+        parameters.setUuid(UUID.nameUUIDFromBytes(("external-storage:" + zone.getUuid() + ":" + storageName).getBytes(StandardCharsets.UTF_8)).toString());
+        parameters.setZoneId(zoneId);
         parameters.setName((String) info.get("name"));
         parameters.setProviderName(ExternalPrimaryDataStoreProvider.NAME);
         parameters.setManaged(false);
@@ -131,39 +143,36 @@ public class ExternalPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCy
 
     @Override
     public boolean attachCluster(DataStore store, ClusterScope scope) {
-        dataStoreHelper.attachCluster(store);
-        for (HostVO host : hostDao.findByClusterId(scope.getScopeId())) {
-            if (host.getHypervisorType() != HypervisorType.External || host.getStatus() != Status.Up) {
-                continue;
-            }
-            try {
-                storageManager.connectHostToSharedPool(host, store.getId());
-            } catch (Exception e) {
-                logger.warn("Unable to record that {} reaches {}: {}", host, store, e.getMessage());
-            }
-        }
-        return true;
+        throw new CloudRuntimeException("External storage is zone scoped");
     }
 
     @Override
     public boolean attachHost(DataStore store, HostScope scope, StoragePoolInfo existingInfo) {
-        throw new CloudRuntimeException("External storage is cluster scoped");
+        throw new CloudRuntimeException("External storage is zone scoped");
     }
 
+    /** Nothing is sent to a host: the clusters already reach the storage, and which of them do is kept with the pool. */
     @Override
     public boolean attachZone(DataStore dataStore, ZoneScope scope, HypervisorType hypervisorType) {
-        throw new CloudRuntimeException("External storage is cluster scoped");
+        dataStoreHelper.attachZone(dataStore, HypervisorType.External);
+        return true;
     }
 
-    /** Maintenance mode stops or moves the instances on a pool. CloudStack never does that to External instances. */
+    /**
+     * Maintenance mode stops or moves the instances on a pool, and CloudStack never does that to External
+     * instances. A pool that records no volume can enter it, which is how a pool is removed.
+     */
     @Override
     public boolean maintain(DataStore store) {
-        throw new CloudRuntimeException("Maintenance mode is not supported for External storage");
+        if (!volumeDao.findNonDestroyedVolumesByPoolId(store.getId()).isEmpty()) {
+            throw new CloudRuntimeException("External storage with recorded volumes cannot enter maintenance mode");
+        }
+        return dataStoreHelper.maintain(store);
     }
 
     @Override
     public boolean cancelMaintain(DataStore store) {
-        throw new CloudRuntimeException("Maintenance mode is not supported for External storage");
+        return dataStoreHelper.cancelMaintain(store);
     }
 
     @Override
@@ -192,11 +201,11 @@ public class ExternalPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCy
 
     @Override
     public void changeStoragePoolScopeToZone(DataStore store, ClusterScope clusterScope, HypervisorType hypervisorType) {
-        throw new CloudRuntimeException("External storage is cluster scoped");
+        throw new CloudRuntimeException("External storage is zone scoped");
     }
 
     @Override
     public void changeStoragePoolScopeToCluster(DataStore store, ClusterScope clusterScope, HypervisorType hypervisorType) {
-        throw new CloudRuntimeException("External storage is cluster scoped");
+        throw new CloudRuntimeException("External storage is zone scoped");
     }
 }

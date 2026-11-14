@@ -17,11 +17,14 @@
 package org.apache.cloudstack.hypervisor.external.storage;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import javax.inject.Inject;
 
@@ -30,10 +33,14 @@ import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.dao.ExtensionDetailsDao;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionDetailsVO;
+import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
+import org.apache.cloudstack.storage.datastore.db.StoragePoolVO;
 
 import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.RunCustomActionCommand;
+import com.cloud.dc.ClusterVO;
+import com.cloud.dc.dao.ClusterDao;
 import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.host.HostVO;
 import com.cloud.host.Status;
@@ -59,7 +66,11 @@ public class ExternalStorageInventory {
         public final boolean active;
         public final long totalBytes;
         public final long usedBytes;
-        Storage(String name, String type, boolean shared, boolean enabled, boolean active, long totalBytes, long usedBytes) {
+        /** What is behind the storage, as the extension names it. */
+        public final String backing;
+        /** The Ceph monitors the cluster uses for it; empty for anything else. */
+        public final Set<String> monitors;
+        Storage(String name, String type, boolean shared, boolean enabled, boolean active, long totalBytes, long usedBytes, String backing, Set<String> monitors) {
             this.name = name;
             this.type = type;
             this.shared = shared;
@@ -67,9 +78,26 @@ public class ExternalStorageInventory {
             this.active = active;
             this.totalBytes = totalBytes;
             this.usedBytes = usedBytes;
+            this.backing = backing;
+            this.monitors = monitors;
         }
     }
 
+    /** Pool details: what the pool was registered for, and the clusters checked against it. */
+    static final String BACKING = "externalBacking";
+    static final String MONITORS = "externalMonitors";
+    static final String CLUSTER = "externalCluster.";
+
+    /**
+     * Two clusters reach the same storage when it has the same backing on both. Clusters list the monitors of
+     * one Ceph differently, so for Ceph one monitor in common is enough.
+     */
+    static boolean same(String backing, Set<String> monitors, String otherBacking, Set<String> otherMonitors) {
+        return backing.equals(otherBacking) && (monitors.isEmpty() && otherMonitors.isEmpty() || !Collections.disjoint(monitors, otherMonitors));
+    }
+
+    @Inject ClusterDao clusterDao;
+    @Inject StoragePoolDetailsDao poolDetailsDao;
     @Inject HostDao hostDao;
     @Inject ExtensionHelper extensionHelper;
     @Inject ExtensionDetailsDao extensionDetailsDao;
@@ -99,12 +127,83 @@ public class ExternalStorageInventory {
         throw new CloudRuntimeException("The External cluster has no host that is Up");
     }
 
-    public List<Storage> list(long clusterId) {
-        HostVO host = host(clusterId);
+    public boolean supported(long clusterId) {
         Extension extension = extensionHelper.getExtensionForCluster(clusterId);
         ExtensionDetailsVO capability = extension == null ? null : extensionDetailsDao.findDetail(extension.getId(), CAPABILITY);
-        if (extension == null || extension.getType() != Extension.Type.Orchestrator || extension.getState() != Extension.State.Enabled
-                || capability == null || capability.getValue() == null || !"true".equalsIgnoreCase(capability.getValue().trim())) {
+        return extension != null && extension.getType() == Extension.Type.Orchestrator && extension.getState() == Extension.State.Enabled
+                && capability != null && capability.getValue() != null && "true".equalsIgnoreCase(capability.getValue().trim());
+    }
+
+    /** The External clusters of a zone whose extension supports storage. */
+    public List<ClusterVO> clusters(long zoneId) {
+        List<ClusterVO> result = new ArrayList<>();
+        for (ClusterVO cluster : clusterDao.listByDcHyType(zoneId, HypervisorType.External.toString())) {
+            if (cluster.getRemoved() == null && supported(cluster.getId())) {
+                result.add(cluster);
+            }
+        }
+        return result;
+    }
+
+    /** The storage of that name on every cluster of the zone that has it. A cluster that cannot be asked fails the call. */
+    public Map<ClusterVO, Storage> findInZone(long zoneId, String name) {
+        Map<ClusterVO, Storage> result = new LinkedHashMap<>();
+        for (ClusterVO cluster : clusters(zoneId)) {
+            Storage storage = find(cluster.getId(), name);
+            if (storage != null) {
+                result.put(cluster, storage);
+            }
+        }
+        return result;
+    }
+
+    /** The pool's storage as the first cluster that can be asked reports it; null when none can. */
+    public Storage findAny(StoragePoolVO pool) {
+        Map<String, String> details = poolDetailsDao.listDetailsKeyPairs(pool.getId());
+        for (ClusterVO cluster : clusters(pool.getDataCenterId())) {
+            if (!details.containsKey(CLUSTER + cluster.getUuid())) {
+                continue;
+            }
+            try {
+                Storage storage = find(cluster.getId(), pool.getPath());
+                if (storage != null) {
+                    return storage;
+                }
+            } catch (RuntimeException e) {
+                // the next cluster
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether the cluster's storage of the pool's name is the storage the pool was registered for. A cluster is
+     * asked once; the answer is kept with the pool when remember is set.
+     */
+    public boolean reaches(StoragePoolVO pool, long clusterId, boolean remember) {
+        ClusterVO cluster = clusterDao.findById(clusterId);
+        Map<String, String> details = poolDetailsDao.listDetailsKeyPairs(pool.getId());
+        if (cluster == null || details.get(BACKING) == null) {
+            return false;
+        }
+        if (details.containsKey(CLUSTER + cluster.getUuid())) {
+            return true;
+        }
+        Storage storage = supported(clusterId) ? find(clusterId, pool.getPath()) : null;
+        String monitors = details.get(MONITORS);
+        Set<String> registered = monitors == null || monitors.isEmpty() ? Collections.emptySet() : new HashSet<>(Arrays.asList(monitors.split(",")));
+        if (storage == null || !storage.shared || !same(storage.backing, storage.monitors, details.get(BACKING), registered)) {
+            return false;
+        }
+        if (remember) {
+            poolDetailsDao.addDetail(pool.getId(), CLUSTER + cluster.getUuid(), providerCluster(clusterId), true);
+        }
+        return true;
+    }
+
+    public List<Storage> list(long clusterId) {
+        HostVO host = host(clusterId);
+        if (!supported(clusterId)) {
             throw new InvalidParameterValueException("The cluster's extension does not support storage");
         }
         Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
@@ -152,7 +251,19 @@ public class ExternalStorageInventory {
                 if (!name.matches("[A-Za-z][A-Za-z0-9._-]*") || !names.add(name) || !type.matches("[a-z][a-z0-9]*")) {
                     throw new IllegalArgumentException();
                 }
-                result.add(new Storage(name, type, flag(row, "shared"), flag(row, "enabled"), flag(row, "active"), total, used));
+                String backing = text(row, "backing");
+                Set<String> monitors = new TreeSet<>();
+                for (JsonElement monitor : row.getAsJsonArray("monitors")) {
+                    String address = monitor.getAsJsonPrimitive().getAsString();
+                    if (!monitor.getAsJsonPrimitive().isString() || !address.matches("[A-Za-z0-9.:\\[\\]/_-]{1,255}")) {
+                        throw new IllegalArgumentException();
+                    }
+                    monitors.add(address);
+                }
+                if (!backing.matches("[\\x21-\\x7e]{1,512}") || monitors.size() > 64) {
+                    throw new IllegalArgumentException();
+                }
+                result.add(new Storage(name, type, flag(row, "shared"), flag(row, "enabled"), flag(row, "active"), total, used, backing, monitors));
             }
             return result;
         } catch (RuntimeException e) {
