@@ -320,5 +320,7 @@ None recorded. Step 8 needs a design.
 - The fork is public because GitHub forks of public repositories are public.
 - 14 Nov 2026: External VM disks are to be visible and manageable in CloudStack (step 8).
 - 14 Nov 2026, storage: imported disks count toward usage and account limits; one disk offering per storage tier; moving a disk between VMs is deferred; whole-VM snapshots are acceptable and per-disk snapshots through Ceph are to be investigated.
+- 14 Nov 2026, storage: offerings are Standard SSD (`ssd-ec`), Premium HDD (`hdd10k-ec`) and Standard HDD (`hdd-ec`); per-disk snapshots are run by the extension with its own Ceph client.
+- 14 Nov 2026: storage (step 8) is built before anything is installed on production, so production gets one deployment.
 - 14 Nov 2026: `Sys.Console` on the extension's Proxmox token, needed to manage HA resources, is acceptable.
 - 14 Nov 2026: Proxmox HA membership is authoritative. Every VM in Proxmox HA gets the CloudStack HA flag on; every VM outside it gets the flag off. The flags are set only after the step 4 jar is running (see "Jar first, flag second").

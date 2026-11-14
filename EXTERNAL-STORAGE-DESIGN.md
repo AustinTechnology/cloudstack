@@ -107,7 +107,17 @@ Imported disks count toward account limits (decided). The import itself is never
 
 ### Offerings
 
-One custom-size disk offering per storage tier (decided), each tagged to its storage. Production has none yet: its disk offerings are three fixed sizes, one untagged custom offering and one tagged `SAS`. The KVM pools already carry one tag per Ceph pool (`ceph-ssd-ec` and so on), which is the same tiering.
+One custom-size disk offering per storage tier (decided), each tagged to its storage:
+
+| Offering | Proxmox storage | Data disks there today |
+|---|---|---|
+| Standard SSD | `ssd-ec` | 150 |
+| Premium HDD | `hdd10k-ec` | 27 |
+| Standard HDD | `hdd-ec` | 31 |
+
+Nine data disks are on storages with no tier: one on `ssd-replicated`, one on `mixed-replicated`, six on node-local LVM-thin and one on a node-local directory. A disk on a storage with no offering is reported and not imported.
+
+Production has none of these offerings yet: its disk offerings are three fixed sizes, one untagged custom offering and one tagged `SAS`. The KVM pools already carry one tag per Ceph pool (`ceph-ssd-ec` and so on), which is the same tiering.
 
 ### Per-disk snapshots on Ceph (to investigate)
 
@@ -128,6 +138,8 @@ Two ways it could be wired, neither traced in the code yet:
 | Through the KVM hosts | The External storage driver hands snapshot, revert and delete to a KVM host that has the matching Ceph pool | No new Ceph credential; CloudStack's snapshot schedules and retention come with it | Unknown whether the snapshot framework allows this routing; several snapshot paths are written for KVM VMs only (`SnapshotManagerImpl`) |
 | From the extension | The script runs `rbd` itself | Independent of KVM hosts | Needs a Ceph client and keyring on the management server |
 
+**Decided 14 Nov 2026: the extension runs `rbd` itself, with its own Ceph client identity.** Ceph is independent of Proxmox here; Proxmox is only a client of it.
+
 Either way CloudStack must refuse or clean up when a disk with snapshots is moved or deleted, because Proxmox will remove them.
 
 The lab has neither Ceph nor a KVM host, so this cannot be tried there as it stands.
@@ -144,10 +156,12 @@ The lab has neither Ceph nor a KVM host, so this cannot be tried there as it sta
 1. **Usage and limits.** Imported disks produce usage records and count against account limits from the day they are imported.
 2. **Disk offerings.** One custom-size offering per storage tier.
 3. **Detached volumes.** Not needed now; possibly later. Deferred.
-4. **Snapshots.** Whole-VM snapshots through CloudStack's VM snapshot feature are acceptable. Per-disk snapshots through Ceph are wanted if an integration can be built; to be investigated.
+4. **Snapshots.** Whole-VM snapshots through CloudStack's VM snapshot feature are acceptable. Per-disk snapshots go through Ceph, run by the extension with its own Ceph client.
+5. **Offering names.** Standard SSD (`ssd-ec`), Premium HDD (`hdd10k-ec`), Standard HDD (`hdd-ec`).
+6. **Order.** Storage is built before the production install, so that production gets one deployment with everything in it.
 
 ## Open
 
-- Which Proxmox storages make up each tier, and what the offerings are called.
+- Whether the nine disks on storages with no tier get an offering.
 - What each account's limits are raised to before the import.
-- Whether per-disk Ceph snapshots are feasible, and by which route.
+- Per-disk Ceph snapshots: the Ceph client's capabilities, how CloudStack's snapshot calls reach the extension, and what happens when Proxmox moves or deletes a snapshotted disk.
