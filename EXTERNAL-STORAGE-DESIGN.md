@@ -1,6 +1,6 @@
 # External VM disks in CloudStack: design (step 8)
 
-**Status:** first draft, 14 Nov 2026. Nothing is built. Four decisions are open (last section).
+**Status:** draft, 14 Nov 2026, with the four decisions of that day recorded (last section). Nothing is built.
 
 **Goal:** the disks of External (Proxmox) VMs are visible in CloudStack as volumes, and can be added, grown, moved and deleted from CloudStack, without CloudStack ever damaging a disk it does not own.
 
@@ -90,10 +90,47 @@ Each phase is usable alone.
 
 1. **See.** Pools registered; the refresh, the periodic worker and `adoptExternalInstance` import and update volumes. Disks show in the UI and API with size and storage. No Proxmox writes. New VMs deployed through CloudStack get a root volume record.
 2. **Change attached disks.** Add a data disk, grow a disk, delete a data disk, move a disk between storages.
-3. **Detached volumes.** Detach a data disk and attach it to another VM. A Proxmox image always belongs to a guest, so this needs a decision on where a detached disk lives.
-4. **Snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the four custom actions. Proxmox snapshots cover the whole guest, so there are no per-volume snapshots.
+3. **Whole-VM snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the four custom actions.
+4. **Per-disk snapshots on Ceph.** To be investigated before it is designed; see the section below.
+
+Deferred, not dropped: detaching a data disk and attaching it to another VM. Until then a data disk lives and dies with its VM. A Proxmox image always belongs to a guest, so this will need a decision on where a detached disk lives. Nothing in phases 1 and 2 may tie a volume's identity to its VM.
 
 Not in scope: backup, templates made from volumes, volume upload and download, ISO attach, reinstalling a root disk, encryption, IOPS limits.
+
+### Limits at import
+
+Imported disks count toward account limits (decided). The import itself is never refused by a limit, because the disks exist whatever CloudStack thinks; it raises the counts and reports every account that lands over.
+
+- Production defaults are 20 volumes and 200 GiB of primary storage per account. Five accounts have their own primary storage limit and three their own volume limit.
+- The 29 accounts that own External VMs have nothing counted today. Over 100 TiB will be spread over them, an average of more than 4 TiB each.
+- An account over its limit cannot deploy a VM or add a disk until the limit is raised. Limits therefore have to be raised before the import, from the per-account totals that the phase 1 dry run produces.
+
+### Offerings
+
+One custom-size disk offering per storage tier (decided), each tagged to its storage. Production has none yet: its disk offerings are three fixed sizes, one untagged custom offering and one tagged `SAS`. The KVM pools already carry one tag per Ceph pool (`ceph-ssd-ec` and so on), which is the same tiering.
+
+### Per-disk snapshots on Ceph (to investigate)
+
+Proxmox has no per-disk snapshot, but 210 of the 217 disks are RBD images, and Ceph can snapshot one image.
+
+What is known:
+
+- CloudStack does not talk to Ceph from the management server. Its KVM host agents do, with the Ceph libraries (`KVMStorageProcessor`). Production has 8 KVM hosts and 5 KVM pools on the same Ceph pool names, so the machinery and the credentials already exist there.
+- Proxmox does not know about a snapshot made outside it. When it deletes a disk it removes every snapshot of the image first, protected ones included (`RBDPlugin.pm`, `free_image`, read on PVE 9.2). Moving a disk to another storage copies only the current state and then deletes the source the same way.
+- Proxmox's own whole-VM snapshots are RBD snapshots on each disk, named after the VM snapshot. Names must not collide.
+- Rolling one image back is only safe with the guest stopped. A snapshot of one disk of a running guest is crash-consistent.
+- Production has `snapshot.backup.to.secondary=true`, so a CloudStack volume snapshot is copied to secondary storage after it is taken. For multi-terabyte disks these snapshots would have to stay on Ceph instead.
+
+Two ways it could be wired, neither traced in the code yet:
+
+| | How | For | Against |
+|---|---|---|---|
+| Through the KVM hosts | The External storage driver hands snapshot, revert and delete to a KVM host that has the matching Ceph pool | No new Ceph credential; CloudStack's snapshot schedules and retention come with it | Unknown whether the snapshot framework allows this routing; several snapshot paths are written for KVM VMs only (`SnapshotManagerImpl`) |
+| From the extension | The script runs `rbd` itself | Independent of KVM hosts | Needs a Ceph client and keyring on the management server |
+
+Either way CloudStack must refuse or clean up when a disk with snapshots is moved or deleted, because Proxmox will remove them.
+
+The lab has neither Ceph nor a KVM host, so this cannot be tried there as it stands.
 
 ## Risks
 
@@ -102,9 +139,15 @@ Not in scope: backup, templates made from volumes, volume upload and download, I
 - **Shared Ceph pools.** A wrong delete can reach another cluster's guest. The identity rule and the explicit "no unreferenced cleanup" are the controls; the lab cannot reproduce two clusters on one pool as it stands.
 - **The lab has no Ceph.** Its storages are NFS and a local directory. RBD behaviour (erasure-coded data pools, move between pools) would first be exercised in production unless the lab gets a Ceph pool.
 
-## Open decisions
+## Decided (14 Nov 2026)
 
-1. **Usage and limits at import.** Should imported disks produce usage records and count against account limits from the day they are imported?
-2. **Disk offerings.** One custom-size offering per storage tier (SSD, 10K, HDD), or a single offering for everything?
-3. **Detached volumes (phase 3).** Is moving a data disk between VMs needed? If not, phase 3 is dropped and a data disk lives and dies with its VM.
-4. **Snapshots (phase 4).** Is whole-VM snapshot through CloudStack's VM snapshot feature the right mapping, with no per-volume snapshots?
+1. **Usage and limits.** Imported disks produce usage records and count against account limits from the day they are imported.
+2. **Disk offerings.** One custom-size offering per storage tier.
+3. **Detached volumes.** Not needed now; possibly later. Deferred.
+4. **Snapshots.** Whole-VM snapshots through CloudStack's VM snapshot feature are acceptable. Per-disk snapshots through Ceph are wanted if an integration can be built; to be investigated.
+
+## Open
+
+- Which Proxmox storages make up each tier, and what the offerings are called.
+- What each account's limits are raised to before the import.
+- Whether per-disk Ceph snapshots are feasible, and by which route.

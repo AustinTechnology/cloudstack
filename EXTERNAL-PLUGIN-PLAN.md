@@ -287,7 +287,7 @@ Source dependency inventory: the operator notes. It is source-only, not a live r
 
 **Decision:** disks of External VMs are to be visible and manageable in CloudStack. The extension framework has no storage support today, so this needs framework work, not only lifted refusals. A design comes first.
 
-Design draft: `EXTERNAL-STORAGE-DESIGN.md` (14 Nov 2026). It has four open decisions; nothing is built.
+Design draft: `EXTERNAL-STORAGE-DESIGN.md` (14 Nov 2026), with that day's four decisions recorded; nothing is built.
 
 CloudStack has no volume records for External VMs. Volume attach, detach, resize, migrate and snapshot all depend on that model, so lifting the refusals alone would not work.
 
@@ -319,5 +319,6 @@ None recorded. Step 8 needs a design.
 - HA follows the model above.
 - The fork is public because GitHub forks of public repositories are public.
 - 14 Nov 2026: External VM disks are to be visible and manageable in CloudStack (step 8).
+- 14 Nov 2026, storage: imported disks count toward usage and account limits; one disk offering per storage tier; moving a disk between VMs is deferred; whole-VM snapshots are acceptable and per-disk snapshots through Ceph are to be investigated.
 - 14 Nov 2026: `Sys.Console` on the extension's Proxmox token, needed to manage HA resources, is acceptable.
 - 14 Nov 2026: Proxmox HA membership is authoritative. Every VM in Proxmox HA gets the CloudStack HA flag on; every VM outside it gets the flag off. The flags are set only after the step 4 jar is running (see "Jar first, flag second").
