@@ -287,6 +287,8 @@ Source dependency inventory: the operator notes. It is source-only, not a live r
 
 **Decision:** disks of External VMs are to be visible and manageable in CloudStack. The extension framework has no storage support today, so this needs framework work, not only lifted refusals. A design comes first.
 
+Design draft: `EXTERNAL-STORAGE-DESIGN.md` (14 Nov 2026). It has four open decisions; nothing is built.
+
 CloudStack has no volume records for External VMs. Volume attach, detach, resize, migrate and snapshot all depend on that model, so lifting the refusals alone would not work.
 
 Until it is built, Proxmox snapshots stay available through the existing custom actions and disk changes are made in Proxmox.
