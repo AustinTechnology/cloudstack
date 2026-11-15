@@ -2763,7 +2763,9 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
      * @param expunge indicates if vm should be expunged
      */
     private void deleteVMSnapshots(VMInstanceVO vm, boolean expunge) {
-        if (! vm.getHypervisorType().equals(HypervisorType.VMware)) {
+        // External, as VMware: the snapshots go with the instance at its orchestrator. An adopted instance is
+        // kept there, with its snapshots, when its records are removed.
+        if (! vm.getHypervisorType().equals(HypervisorType.VMware) && ! vm.getHypervisorType().equals(HypervisorType.External)) {
             if (!_vmSnapshotMgr.deleteAllVMSnapshots(vm.getId(), null)) {
                 logger.debug("Unable to delete all Snapshots for {}", vm);
                 throw new CloudRuntimeException("Unable to delete Instance Snapshots for " + vm);

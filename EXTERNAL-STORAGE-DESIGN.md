@@ -90,7 +90,7 @@ Each phase is usable alone.
 
 1. **See.** Pools registered; the refresh, the periodic worker and `adoptExternalInstance` import and update volumes. Disks show in the UI and API with size and storage. No Proxmox writes. A VM deployed through CloudStack gets its volume records at its next refresh. **Built and tested in the lab; see below.**
 2. **Change attached disks.** Add a data disk, grow a disk, delete a data disk, move a disk between storages. **Built and tested in the lab; see below.**
-3. **Whole-VM snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the four custom actions.
+3. **Whole-VM snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the custom actions. Built; see "Phase 3 as built".
 4. **Per-disk snapshots on Ceph.** To be investigated before it is designed; see the section below.
 
 Deferred, not dropped: detaching a data disk and attaching it to another VM. Until then a data disk lives and dies with its VM. A Proxmox image always belongs to a guest, so this will need a decision on where a detached disk lives. Nothing in phases 1 and 2 may tie a volume's identity to its VM.
@@ -272,13 +272,70 @@ It still refuses when the recorded volume is in a different slot (the record is 
 
 ### Found, not changed
 
-- **Which cluster a new instance goes to.** Stock External planning takes the first cluster that has a host Up, every time, and does not look at storage. With no host named, every new instance went to the first cluster. An instance created from an ISO on a tier whose storage only the other cluster has would fail at its first start with the stock "Unable to orchestrate the start" (nothing is created in Proxmox). Production's three tiers are on both clusters, so this only bites a storage that one cluster lacks.
+- **Which cluster a new instance goes to.** Left as stock by decision (15 Nov 2026): every storage of a zone is mapped to all of its clusters. Stock External planning takes the first cluster that has a host Up, every time, and does not look at storage. With no host named, every new instance went to the first cluster. An instance created from an ISO on a tier whose storage only the other cluster has would fail at its first start with the stock "Unable to orchestrate the start" (nothing is created in Proxmox). Production's three tiers are on both clusters, so this only bites a storage that one cluster lacks.
 - **Adoption as root admin where two networks share a VLAN.** Refused, because root admin may use both. The lab has overlapping VLANs only because its test accounts were given them on purpose; adopting for the owning account works.
 - **A refresh of a guest with a change waiting** fails with the general "External configuration collection failed", not the reason.
 
+## Phase 3 as built (15 Nov 2026, lab only)
+
+CloudStack's own Instance Snapshots (`createVMSnapshot`, `revertToVMSnapshot`, `deleteVMSnapshot`, `listVMSnapshot`, and the same buttons in the UI) work for an External instance whose extension declares `instancesnapshotsupported=true`. Nothing new was added to the API. The stock snapshot strategy runs unchanged: it sends its three ordinary commands to the instance's host, and the External host hands them to the extension as `createsnapshot`, `revertsnapshot` and `deletesnapshot`.
+
+| | |
+|---|---|
+| Name | Proxmox holds the snapshot under the name CloudStack generates (`i-2-7-VM_VS_20261115050901`). The name the owner typed, and the description, go into the Proxmox description. |
+| With memory | A snapshot with memory is taken from a running instance; Proxmox writes the memory to a state volume on one of the instance's storages. |
+| Revert | As stock: a snapshot without memory is reverted to with the instance stopped, and it stays stopped; one with memory with the instance running, and it runs on from the saved memory (a new QEMU process). The extension refuses either on an instance in the other power state, so a revert never stops or starts a guest that CloudStack did not expect to change. |
+| Delete | Removes that one snapshot. A snapshot already gone from Proxmox needs no write, so its record can still be deleted, as can the record of a snapshot that failed to be taken. |
+| Limits and usage | Stock: `vmsnapshot.max` per instance, usage events per volume. |
+| Adopted instances | Each action runs under the claim's `create_snapshot`, `restore_snapshot` or `delete_snapshot` lease. A refusal before any write, or a Proxmox task that failed, releases the lease; anything unconfirmed keeps it. |
+| Locking | A snapshot action, a disk change and a refresh of one instance never run together. |
+| Other snapshots | A snapshot CloudStack did not make is never touched: every action names one snapshot. It is not imported either. |
+
+What an instance with snapshots can no longer do, as for every other hypervisor: add or remove a NIC (stock check), and change its disks. `adddisk`, `resizedisk`, `deletedisk`, `movedisk` and a tier change are refused, by CloudStack while it records a snapshot of the instance, and by the extension while Proxmox holds any snapshot of it, including one CloudStack does not record. The reason is the same in both: Proxmox keeps the image of a deleted disk, will not move a disk, and a revert undoes whatever was done since. CPU and memory may still be changed with the instance stopped; a revert brings back those of the snapshot, in Proxmox and in the record.
+
+Destroy leaves the snapshots, as for VMware; expunge removes the records without a call per snapshot. Proxmox destroys an ordinary instance's snapshots with the instance. An adopted instance is kept in Proxmox with its snapshots.
+
+Changed outside the plugin: `VMSnapshotManagerImpl` (the two refusals became the capability check; the hypervisor capabilities table has no External row and is not asked), `VMSnapshotHelperImpl` (the host for an External instance is its own host or, when that is down, another of its cluster: its storage is zone-wide and says nothing of the cluster), `VirtualMachineManagerImpl` (snapshots on destroy, as VMware), `UserVmManagerImpl` (see the first finding), `UserVmResponse`/`UserVmJoinDaoImpl` (the capability), `ui/src/config/section/compute.js` (the button).
+
+Live in the lab (jar `snap-f`, extension script `c86e59d7`):
+
+| Check | Result |
+|---|---|
+| Without the capability | Refused: "Operation not supported for instance" |
+| Adopted guest, all disks on Ceph, second cluster: snapshot running; snapshot with memory; revert to memory while running; stop, revert without memory, start; delete both | Pass. Each disk image has an RBD snapshot of the same name; the memory state is an RBD image `vm-103-state-<name>`; all are gone after the deletes. No lease or fence left at any step |
+| Revert in the wrong power state | Refused by stock, both ways, with its own message |
+| A disk on storage that cannot snapshot (raw file on NFS) | Proxmox's task fails: "snapshot feature is not available". The record is left in Error, as stock, and is deleted without any call to Proxmox |
+| A disk change while a snapshot exists | Refused; no Proxmox call |
+| A guest locked in Proxmox | Refused before any task; the claim is managed with no lease |
+| A snapshot deleted in Proxmox behind CloudStack | Its record is deleted; no Proxmox task |
+| Stopped: snapshot, scale 1 CPU/256 MiB to 2/512, revert | Proxmox and the record are back at 1/256; account CPU and memory counts follow |
+| Running: memory snapshot at 1/256, stop, scale to 2/512, start, revert | Pass after the change below; the record and the counts are back at 1/256 |
+| HA-managed adopted guest (qcow2 on NFS): both kinds, revert to memory while running, revert without memory while stopped | Pass; the HA service stays `started` (or `stopped`) throughout; no HA work in CloudStack |
+| Ordinary instance on the second cluster with VMID 100, which the first cluster also uses on the same Ceph pools: both kinds, revert, then expunge with both snapshots present | One destroy task. Its image, the image's snapshots and the memory state image are gone. The first cluster's guest 100 keeps its two images and keeps running in the same process |
+| Adopted instance with both kinds of snapshot: expunge its records | The records and counts are gone; the claim is released; Proxmox keeps the guest, stopped, with both snapshots |
+| The same guest adopted again | A disk add is refused by the extension: "The instance has snapshots in Proxmox; its disks cannot be changed until they are deleted" |
+| Every guest afterwards | Refresh (dry run) reports no change; account counts equal the volumes; no snapshot records, no RBD snapshots or state images left; four claims managed, no lease, no fence |
+
+Tests: 783 Java, 77 extension, 9 getconfig, and 11 checks of when the UI offers the button.
+
+### Found and changed
+
+- **Revert to a memory snapshot after CPU or memory was changed.** Stock then changes the offering of the running instance, which for External is refused ("Scaling the VM dynamically is not supported"): Proxmox had reverted and CloudStack reported failure and kept the newer CPU and memory. Now `scale` succeeds without a write when Proxmox already has the CPU and memory asked for, running or stopped, and the offering change of a running External instance goes through that. Anything else is still refused for a running instance. (Stock has the same failure for KVM and VMware when the snapshot has less CPU or memory than now; that is left alone.)
+- **Volumes had no image format, and that stopped volume statistics for the whole zone.** The stock statistics task (every ten minutes) throws on the first volume without a format and gives up, so no pool after an External pool got statistics, KVM pools included. This came in with phase 1 and would have stopped KVM volume statistics in production. Every External volume now has a format (qcow2 or vmdk by its file name, otherwise raw), and a refresh gives one to a volume recorded without. With formats in place the task then sent every External host a statistics command it cannot answer, one warning per host and pool each run; the External storage driver now takes the question itself and has nothing to report, so External volumes show no physical size or utilisation.
+
+### Not done, and limits
+
+- **The old custom actions.** `CreateSnapshot`, `RestoreSnapshot` and `DeleteSnapshot` are deleted from the lab's extension; the extension script still has their code, unreachable. `ListSnapshots` is kept: it is read-only and is the only way to see, from CloudStack, a snapshot that Proxmox holds and CloudStack does not record. Production needs the same three deletions at install.
+- **A snapshot made outside CloudStack** (the one production guest that has one, or one made in Proxmox later) is not imported. It blocks disk changes until it is deleted in Proxmox.
+- **Where the memory goes.** Proxmox chooses the storage of the state volume from the instance's disks; it was the replicated pool for one guest and the erasure-coded pool for another. Stock adds the instance's memory size to the snapshot's primary-storage usage event; nothing is counted against the account's storage limit, as stock.
+- **Two clusters, same VMID, same name.** A state volume is named from the VMID and the snapshot name. CloudStack's names contain the instance name, so two instances never share one. The old custom actions took a name from the user, which could collide across clusters on a shared pool.
+- **CD drives.** A revert brings back the CD drives of the snapshot in Proxmox. CloudStack's record of attached ISOs is not changed; it is applied again at the next start through CloudStack, as it is after any change made in Proxmox.
+- **Quiesce.** Not offered. Proxmox freezes the guest's filesystems itself when the guest agent is enabled.
+- **Not shown live:** a lost answer during a snapshot action on an adopted guest (the lease rules are the ones every other action uses, and are covered by the extension's tests); Windows guests; a second management server; the UI clicked in a browser (the rule that shows the button is checked, and the built bundle is deployed).
+
 ## Risks
 
-- **Core changes to carry.** Phases 1 and 2 touch `VolumeApiServiceImpl`, `SnapshotManagerImpl`, `UserVmManagerImpl`, `VolumeOrchestrator`, `QueryManagerImpl`, `VolumeJoinDaoImpl`, `UserVmJoinDaoImpl` and three UI files. Phase 3 will add `VMSnapshotManagerImpl`. Each is another patch to re-apply on upgrade until upstream takes it.
+- **Core changes to carry.** Phases 1 and 2 touch `VolumeApiServiceImpl`, `SnapshotManagerImpl`, `UserVmManagerImpl`, `VolumeOrchestrator`, `QueryManagerImpl`, `VolumeJoinDaoImpl`, `UserVmJoinDaoImpl` and three UI files. Phase 3 adds `VMSnapshotManagerImpl`, `VMSnapshotHelperImpl` and `VirtualMachineManagerImpl`. Each is another patch to re-apply on upgrade until upstream takes it.
 - **Billing starts at import.** Phase 1 creates usage records and raises account storage totals for over 100 TiB that CloudStack has never counted.
 - **Shared Ceph pools.** A wrong delete can reach another cluster's guest. The identity rule and the explicit "no unreferenced cleanup" are the controls. The lab now has two clusters on one pool and a guest with the same VMID in each: deleting one left the other's images alone.
 - **The lab's Ceph is one node.** It proves RBD behaviour (erasure-coded data pools, moves between pools) but nothing about speed, and both clusters list the same single monitor, so "one monitor in common" between different monitor lists is still covered by unit tests only.
@@ -293,6 +350,7 @@ It still refuses when the recorded volume is in a different slot (the record is 
 4. **Snapshots.** Whole-VM snapshots through CloudStack's VM snapshot feature are acceptable. Per-disk snapshots go through Ceph, run by the extension with its own Ceph client.
 5. **Offering names.** Standard SSD (`ssd-ec`), Premium HDD (`hdd10k-ec`), Standard HDD (`hdd-ec`).
 6. **Order.** Storage is built before the production install, so that production gets one deployment with everything in it.
+7. **Placement (15 Nov 2026).** The planner stays stock. The same storages are mapped to every cluster of a zone, so any cluster can hold any tier.
 
 ## Open
 

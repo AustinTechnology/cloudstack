@@ -2416,6 +2416,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public boolean isInstanceSnapshotSupported(long extensionId) {
+        Extension extension = getExtension(extensionId);
+        if (extension == null || extension.getType() != Extension.Type.Orchestrator
+                || extension.getState() != Extension.State.Enabled) {
+            return false;
+        }
+        ExtensionDetailsVO details = extensionDetailsDao.findDetail(extensionId, INSTANCE_SNAPSHOT_SUPPORTED);
+        return details != null && Boolean.parseBoolean(StringUtils.trim(details.getValue()));
+    }
+
+    @Override
     public boolean isInstanceIsoSupported(long extensionId) {
         Extension extension = getExtension(extensionId);
         if (extension == null || extension.getType() != Extension.Type.Orchestrator

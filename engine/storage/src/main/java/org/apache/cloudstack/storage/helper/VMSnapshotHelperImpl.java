@@ -45,6 +45,7 @@ import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.storage.Storage;
 import com.cloud.storage.VolumeVO;
 import com.cloud.storage.dao.VolumeDao;
@@ -88,9 +89,33 @@ public class VMSnapshotHelperImpl implements VMSnapshotHelper {
         return _vmSnapshottateMachine.transitTo(vsnp, event, null, _vmSnapshotDao);
     }
 
+    /**
+     * The orchestrator of an External instance is reached through any host of the instance's cluster. Its volumes
+     * are on storage of the whole zone, which says nothing of the cluster, so the instance's own host is used and,
+     * when that host is not up, another of the same cluster.
+     */
+    protected Long pickHostOfExternalInstance(UserVmVO vm) {
+        Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
+        HostVO host = hostId == null ? null : hostDao.findById(hostId);
+        if (host == null) {
+            throw new InvalidParameterValueException("The instance has no host");
+        }
+        if (host.getStatus() == com.cloud.host.Status.Up && !host.isInMaintenanceStates()) {
+            return host.getId();
+        }
+        List<HostVO> hosts = hostDao.listAllUpAndEnabledNonHAHosts(Host.Type.Routing, host.getClusterId(), host.getPodId(), host.getDataCenterId(), null);
+        if (hosts == null || hosts.isEmpty()) {
+            throw new InvalidParameterValueException("no host in up state is found");
+        }
+        return hosts.get(0).getId();
+    }
+
     @Override
     public Long pickRunningHost(Long vmId) {
         UserVmVO vm = userVmDao.findById(vmId);
+        if (HypervisorType.External.equals(vm.getHypervisorType())) {
+            return pickHostOfExternalInstance(vm);
+        }
         // use VM's host if VM is running
         if (vm.getState() == VirtualMachine.State.Running)
             return vm.getHostId();

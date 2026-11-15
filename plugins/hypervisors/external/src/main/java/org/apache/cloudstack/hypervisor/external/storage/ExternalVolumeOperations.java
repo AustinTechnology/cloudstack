@@ -51,6 +51,7 @@ import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineManager;
 import com.cloud.vm.dao.VMInstanceDao;
+import com.cloud.vm.snapshot.dao.VMSnapshotDao;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -73,6 +74,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
     @Inject ExternalStorageInventory inventory;
     @Inject ExternalVolumeSync volumeSync;
     @Inject ExternalInstanceLock instanceLock;
+    @Inject VMSnapshotDao vmSnapshotDao;
 
     /** How long a disk change waits for a refresh or another disk change of the instance to finish. */
     private static final int LOCK_WAIT_SECONDS = 30;
@@ -182,6 +184,25 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
     }
 
     /** The instance a recorded volume is on, to lock it; the volume is read again once it is locked. */
+    /**
+     * A snapshot of the instance holds its disks as they were. Reverting to it would bring back a disk deleted
+     * since, lose one added since, and return a moved or grown disk to where and what it was, so the disks are
+     * left alone until the snapshots are deleted.
+     */
+    private VirtualMachine withoutSnapshots(VirtualMachine vm) {
+        if (!vmSnapshotDao.findByVm(vm.getId()).isEmpty()) {
+            throw reject("The disks of an instance with Instance Snapshots cannot be changed; delete its Instance Snapshots first");
+        }
+        return vm;
+    }
+
+    private Volume withoutSnapshots(Volume given) {
+        if (!vmSnapshotDao.findByVm(instanceOf(given)).isEmpty()) {
+            throw reject("The disks of an instance with Instance Snapshots cannot be changed; delete its Instance Snapshots first");
+        }
+        return given;
+    }
+
     private long instanceOf(Volume given) {
         VolumeVO volume = volumeDao.findById(given.getId());
         if (volume == null || volume.getInstanceId() == null) {
@@ -192,7 +213,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
 
     @Override
     public Volume add(VirtualMachine vm, Volume given) {
-        return instanceLock.hold(vm.getId(), LOCK_WAIT_SECONDS, () -> addLocked(vm, given));
+        return instanceLock.hold(vm.getId(), LOCK_WAIT_SECONDS, () -> addLocked(withoutSnapshots(vm), given));
     }
 
     private Volume addLocked(VirtualMachine vm, Volume given) {
@@ -220,7 +241,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
 
     @Override
     public Volume grow(Volume given, long newSizeBytes) {
-        return instanceLock.hold(instanceOf(given), LOCK_WAIT_SECONDS, () -> growLocked(given, newSizeBytes));
+        return instanceLock.hold(instanceOf(given), LOCK_WAIT_SECONDS, () -> growLocked(withoutSnapshots(given), newSizeBytes));
     }
 
     private Volume growLocked(Volume given, long newSizeBytes) {
@@ -252,7 +273,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
     @Override
     public void remove(VirtualMachine vm, Volume given) {
         instanceLock.hold(vm.getId(), LOCK_WAIT_SECONDS, () -> {
-            removeLocked(vm, given);
+            removeLocked(withoutSnapshots(vm), given);
             return null;
         });
     }
@@ -272,7 +293,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
 
     @Override
     public Volume move(Volume given, StoragePool destination) {
-        return instanceLock.hold(instanceOf(given), LOCK_WAIT_SECONDS, () -> moveLocked(given, destination));
+        return instanceLock.hold(instanceOf(given), LOCK_WAIT_SECONDS, () -> moveLocked(withoutSnapshots(given), destination));
     }
 
     private Volume moveLocked(Volume given, StoragePool destination) {
@@ -304,7 +325,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
 
     @Override
     public Volume changeOffering(Volume given, DiskOffering offering, Long newSizeBytes, boolean moveAllowed) {
-        return instanceLock.hold(instanceOf(given), LOCK_WAIT_SECONDS, () -> changeOfferingLocked(given, offering, newSizeBytes, moveAllowed));
+        return instanceLock.hold(instanceOf(given), LOCK_WAIT_SECONDS, () -> changeOfferingLocked(withoutSnapshots(given), offering, newSizeBytes, moveAllowed));
     }
 
     private Volume changeOfferingLocked(Volume given, DiskOffering offering, Long newSizeBytes, boolean moveAllowed) {

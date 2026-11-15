@@ -100,6 +100,7 @@ public class ExternalVolumeSyncTest {
         when(volume.isDisplayVolume()).thenReturn(true);
         when(volume.getDiskOfferingId()).thenReturn(60L);
         when(volume.getUuid()).thenReturn("volume-" + id);
+        when(volume.getFormat()).thenReturn(com.cloud.storage.Storage.ImageFormat.RAW);
         when(sync.volumeDao.findByPoolIdAndPath(5L, path)).thenReturn(volume);
         return volume;
     }
@@ -175,6 +176,7 @@ public class ExternalVolumeSyncTest {
         verify(sync.volumeManager).importVolume(eq(Volume.Type.DATADISK), eq("DATA-10-scsi1"), eq(offering), eq(100 * GIB), isNull(), isNull(), any(), any(), eq(vm), any(), any(),
                 eq(1L), eq(5L), eq(StoragePoolType.RBD), eq("ssd:vm-110-disk-1"), isNull());
         verify(sync.volumeDetailsDao).addDetail(99L, ExternalVolumeSync.SLOT_DETAIL, "scsi0", false);
+        verify(created, org.mockito.Mockito.times(2)).setFormat(com.cloud.storage.Storage.ImageFormat.RAW);
         verify(sync.resourceLimits, org.mockito.Mockito.times(2)).incrementVolumeResourceCount(40L, true, 32 * GIB, offering);
         verifyNoMoreInteractions(sync.resourceLimits);
         verify(sync, org.mockito.Mockito.times(2)).publish(eq(EventTypes.EVENT_VOLUME_CREATE), eq(created), anyLong());
@@ -335,6 +337,22 @@ public class ExternalVolumeSyncTest {
         verify(sync.resourceLimits).incrementVolumePrimaryStorageResourceCount(40L, true, 12 * GIB, offering);
         verify(sync).publish(EventTypes.EVENT_VOLUME_RESIZE, volume, 32 * GIB);
         assertTrue(unresolved.isEmpty());
+    }
+
+    @Test
+    public void everyVolumeHasAnImageFormatAndOneRecordedWithoutIsGivenIt() {
+        assertEquals(com.cloud.storage.Storage.ImageFormat.RAW, ExternalVolumeSync.format("ssd:vm-110-disk-0"));
+        assertEquals(com.cloud.storage.Storage.ImageFormat.RAW, ExternalVolumeSync.format("nfs:110/vm-110-disk-0.raw"));
+        assertEquals(com.cloud.storage.Storage.ImageFormat.QCOW2, ExternalVolumeSync.format("nfs:110/vm-110-disk-0.qcow2"));
+        VolumeVO root = recorded(70L, Volume.Type.ROOT, "ssd:vm-110-disk-0", 32 * GIB, 0L, 10L);
+        when(root.getFormat()).thenReturn(null);
+        when(sync.volumeDao.findByInstance(10L)).thenReturn(Arrays.asList(root));
+
+        assertTrue(sync.sync(vm, 7L, snapshot(ROOT_DISK), true, unresolved).isEmpty());
+        verify(root, never()).setFormat(any());
+        assertTrue(sync.sync(vm, 7L, snapshot(ROOT_DISK), false, unresolved).isEmpty());
+        verify(root).setFormat(com.cloud.storage.Storage.ImageFormat.RAW);
+        verify(sync.volumeDao).update(70L, root);
     }
 
     @Test

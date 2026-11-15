@@ -185,7 +185,9 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canProvideVolumeStats() {
-        return false;
+        // Otherwise every host of the pool is sent a command, every ten minutes, that it cannot answer.
+        // The orchestrator is not asked what each disk uses, so there is nothing to give: see getVolumeStats.
+        return true;
     }
 
     @Override

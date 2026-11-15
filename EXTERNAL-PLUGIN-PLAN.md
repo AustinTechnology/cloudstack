@@ -283,15 +283,9 @@ Validation: real lab reads, native dry-run/apply with observed CPU/RAM/IP change
 
 Source dependency inventory: the operator notes. It is source-only, not a live registry snapshot. Stopped-source adoption remains unsupported unless deliberately implemented; parity does not require starting a stopped guest merely to import it.
 
-### Step 8: disks (decided 14 Nov 2026: model them in CloudStack; design not started)
+### Step 8: disks (decided 14 Nov 2026: model them in CloudStack)
 
-**Decision:** disks of External VMs are to be visible and manageable in CloudStack. The extension framework has no storage support today, so this needs framework work, not only lifted refusals. A design comes first.
-
-Design draft: `EXTERNAL-STORAGE-DESIGN.md` (14 Nov 2026), with that day's four decisions recorded; nothing is built.
-
-CloudStack has no volume records for External VMs. Volume attach, detach, resize, migrate and snapshot all depend on that model, so lifting the refusals alone would not work.
-
-Until it is built, Proxmox snapshots stay available through the existing custom actions and disk changes are made in Proxmox.
+Design and as-built record: `EXTERNAL-STORAGE-DESIGN.md`. Built in the lab only, nothing on production: disks as volumes (phase 1), add, grow, delete and move through the volume API (phase 2), CD/DVD ISOs (`EXTERNAL-ISO-PLAN.md`), and whole-instance snapshots through CloudStack's Instance Snapshot API (phase 3, 15 Nov 2026). Per-disk snapshots on Ceph (phase 4) are still to be investigated. Moving a disk between instances is deferred.
 
 ### Step 9: upstream
 
@@ -322,6 +316,7 @@ None recorded. Step 8 needs a design.
 - 14 Nov 2026, storage: imported disks count toward usage and account limits; one disk offering per storage tier; moving a disk between VMs is deferred; whole-VM snapshots are acceptable and per-disk snapshots through Ceph are to be investigated.
 - 14 Nov 2026, storage: offerings are Standard SSD (`ssd-ec`), Premium HDD (`hdd10k-ec`) and Standard HDD (`hdd-ec`); per-disk snapshots are run by the extension with its own Ceph client.
 - 14 Nov 2026: storage (step 8) is built before anything is installed on production, so production gets one deployment.
+- 15 Nov 2026: the planner stays stock; the same storages are mapped to every cluster of a zone. Whole-instance snapshots (storage phase 3) are built in the lab through CloudStack's own Instance Snapshot API; see `EXTERNAL-STORAGE-DESIGN.md`.
 - 14 Nov 2026: `Sys.Console` on the extension's Proxmox token, needed to manage HA resources, is acceptable.
 - 14 Nov 2026: Proxmox HA membership is authoritative. Every VM in Proxmox HA gets the CloudStack HA flag on; every VM outside it gets the flag off. The flags are set only after the step 4 jar is running (see "Jar first, flag second").
 - 14 Nov 2026, CD/DVD ISOs: keep stock behaviour. A running guest is changed at once; a stopped guest is only recorded and its drives are set at its next start through CloudStack; media mounted in Proxmox is not recorded and is ejected at that start. Any Ready CloudStack ISO can be used and is copied, verified, to the Proxmox ISO storage on first use. Up to two drives. A guest can be created straight from an ISO, with BIOS, UEFI or UEFI Secure (keys and TPM) chosen per guest; the EFI disk and TPM state go on the root disk's storage. Deleting an ISO deletes its Proxmox copy and ejects it first from any guest that holds it. Improving on stock is separate upstream work. Plan, built contract and lab test record: `EXTERNAL-ISO-PLAN.md`.

@@ -33,6 +33,7 @@ import org.apache.cloudstack.annotation.dao.AnnotationDao;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.command.user.vmsnapshot.ListVMSnapshotCmd;
 import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreProvider;
 import org.apache.cloudstack.engine.subsystem.api.storage.StorageStrategyFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.VMSnapshotOptions;
@@ -71,7 +72,8 @@ import com.cloud.exception.ResourceAllocationException;
 import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.exception.VirtualMachineMigrationException;
 import com.cloud.gpu.GPU;
-import com.cloud.hypervisor.Hypervisor;
+import com.cloud.host.HostVO;
+import com.cloud.host.dao.HostDao;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.hypervisor.dao.HypervisorCapabilitiesDao;
 import com.cloud.projects.Project.ListProjectResourcesCriteria;
@@ -139,6 +141,10 @@ public class VMSnapshotManagerImpl extends MutualExclusiveIdsManagerBase impleme
 
     @Inject
     VMInstanceDao _vmInstanceDao;
+    @Inject
+    HostDao _hostDao;
+    @Inject
+    ExtensionHelper extensionHelper;
     @Inject ServiceOfferingDetailsDao _serviceOfferingDetailsDao;
     @Inject VMSnapshotDao _vmSnapshotDao;
     @Inject VolumeDao _volumeDao;
@@ -324,6 +330,19 @@ public class VMSnapshotManagerImpl extends MutualExclusiveIdsManagerBase impleme
         return CallContext.current().getCallingAccount();
     }
 
+    /** An External instance has Instance Snapshots only when the extension of its cluster declares them. */
+    protected void checkExternalInstanceSnapshotSupport(UserVmVO userVm) {
+        if (!HypervisorType.External.equals(userVm.getHypervisorType())) {
+            return;
+        }
+        Long hostId = userVm.getHostId() != null ? userVm.getHostId() : userVm.getLastHostId();
+        HostVO host = hostId == null ? null : _hostDao.findById(hostId);
+        Long extensionId = host == null || host.getClusterId() == null ? null : extensionHelper.getExtensionIdForCluster(host.getClusterId());
+        if (extensionId == null || !extensionHelper.isInstanceSnapshotSupported(extensionId)) {
+            throw new InvalidParameterValueException(String.format("Operation not supported for instance: %s", userVm.getName()));
+        }
+    }
+
     @Override
     public VMSnapshot allocVMSnapshot(Long vmId, String vsDisplayName, String vsDescription, Boolean snapshotMemory) throws ResourceAllocationException {
 
@@ -335,9 +354,7 @@ public class VMSnapshotManagerImpl extends MutualExclusiveIdsManagerBase impleme
             throw new InvalidParameterValueException("Creating Instance Snapshot failed because Instance:" + vmId + " is a System VM or does not exist");
         }
 
-        if (HypervisorType.External.equals(userVmVo.getHypervisorType())) {
-            throw new InvalidParameterValueException("VM snapshot operation is not allowed for hypervisor type External");
-        }
+        checkExternalInstanceSnapshotSupport(userVmVo);
 
         // VM snapshot with memory is not supported for VGPU Vms
         if (snapshotMemory && _serviceOfferingDetailsDao.findDetail(userVmVo.getServiceOfferingId(), GPU.Keys.vgpuType.toString()) != null) {
@@ -345,7 +362,8 @@ public class VMSnapshotManagerImpl extends MutualExclusiveIdsManagerBase impleme
         }
 
         // check hypervisor capabilities
-        if (!_hypervisorCapabilitiesDao.isVmSnapshotEnabled(userVmVo.getHypervisorType(), "default"))
+        // An External hypervisor has no capabilities row: its extension said what it supports, above.
+        if (!HypervisorType.External.equals(userVmVo.getHypervisorType()) && !_hypervisorCapabilitiesDao.isVmSnapshotEnabled(userVmVo.getHypervisorType(), "default"))
             throw new InvalidParameterValueException("Instance Snapshot is not enabled for hypervisor type: " + userVmVo.getHypervisorType());
 
         // parameter length check
@@ -540,12 +558,7 @@ public class VMSnapshotManagerImpl extends MutualExclusiveIdsManagerBase impleme
         if (UserVmManager.SHAREDFSVM.equals(userVm.getUserVmType())) {
             throw new InvalidParameterValueException("Operation not supported on Shared FileSystem Instance");
         }
-        if (Hypervisor.HypervisorType.External.equals(userVm.getHypervisorType())) {
-            logger.error("Create VM snapshot not supported for {} as it is {} hypervisor instance",
-                    userVm, Hypervisor.HypervisorType.External.name());
-            throw new InvalidParameterValueException(String.format("Operation not supported for instance: %s",
-                    userVm.getName()));
-        }
+        checkExternalInstanceSnapshotSupport(userVm);
         VMSnapshotVO vmSnapshot = _vmSnapshotDao.findById(vmSnapshotId);
         if (vmSnapshot == null) {
             throw new CloudRuntimeException("Instance Snapshot id: " + vmSnapshotId + " can not be found");

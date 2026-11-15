@@ -24,6 +24,14 @@ import com.cloud.agent.api.PlugNicCommand;
 import com.cloud.agent.api.UnPlugNicAnswer;
 import com.cloud.agent.api.UnPlugNicCommand;
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
+import com.cloud.agent.api.CreateVMSnapshotAnswer;
+import com.cloud.agent.api.CreateVMSnapshotCommand;
+import com.cloud.agent.api.DeleteVMSnapshotAnswer;
+import com.cloud.agent.api.DeleteVMSnapshotCommand;
+import com.cloud.agent.api.RevertToVMSnapshotAnswer;
+import com.cloud.agent.api.RevertToVMSnapshotCommand;
+import com.cloud.agent.api.VMSnapshotBaseCommand;
+import com.cloud.vm.VirtualMachine;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
@@ -84,4 +92,27 @@ public interface ExternalProvisioner extends Manager {
 
     /** Empties the CD drive of a running instance that holds the ISO the command names. */
     Answer detachInstanceIso(String hostGuid, String extensionName, String extensionRelativePath, org.apache.cloudstack.storage.command.DettachCommand cmd);
+
+    /**
+     * Takes, reverts to or deletes a snapshot of a whole instance, as the stock Instance Snapshot command asks.
+     * The answer is of the type that command is answered with.
+     */
+    Answer changeInstanceSnapshot(String hostGuid, String extensionName, String extensionRelativePath, VMSnapshotBaseCommand cmd);
+
+    /** The answer of the type the stock Instance Snapshot strategy casts to, for a result that changed nothing it reads. */
+    static Answer snapshotAnswer(VMSnapshotBaseCommand cmd, boolean result, String details, VirtualMachine.PowerState power) {
+        if (cmd instanceof CreateVMSnapshotCommand) {
+            return result ? new CreateVMSnapshotAnswer((CreateVMSnapshotCommand) cmd, cmd.getTarget(), cmd.getVolumeTOs())
+                    : new CreateVMSnapshotAnswer((CreateVMSnapshotCommand) cmd, false, details);
+        }
+        if (cmd instanceof RevertToVMSnapshotCommand) {
+            return result ? new RevertToVMSnapshotAnswer((RevertToVMSnapshotCommand) cmd, cmd.getVolumeTOs(), power)
+                    : new RevertToVMSnapshotAnswer((RevertToVMSnapshotCommand) cmd, false, details);
+        }
+        if (cmd instanceof DeleteVMSnapshotCommand) {
+            return result ? new DeleteVMSnapshotAnswer((DeleteVMSnapshotCommand) cmd, cmd.getVolumeTOs())
+                    : new DeleteVMSnapshotAnswer((DeleteVMSnapshotCommand) cmd, false, details);
+        }
+        return new Answer(cmd, false, "Unsupported Instance Snapshot command");
+    }
 }

@@ -112,6 +112,7 @@ public class ExternalVolumeOperationsTest {
         operations.inventory = mock(ExternalStorageInventory.class);
         operations.volumeSync = mock(ExternalVolumeSync.class);
         operations.instanceLock = mock(ExternalInstanceLock.class);
+        operations.vmSnapshotDao = mock(com.cloud.vm.snapshot.dao.VMSnapshotDao.class);
         when(operations.instanceLock.hold(eq(10L), anyInt(), any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(2)).get());
         doReturn(1024L).when(operations).maxCustomSizeGib();
         vm = mock(VMInstanceVO.class);
@@ -226,6 +227,17 @@ public class ExternalVolumeOperationsTest {
         assertThrows(InvalidParameterValueException.class, () -> operations.grow(volume, 150 * GIB));
         verifyNoInteractions(operations.extensionsManager);
         verify(operations.volumeSync, never()).resize(any(), anyLong());
+    }
+
+    @Test
+    public void noDiskOfAnInstanceWithSnapshotsIsChanged() {
+        when(operations.vmSnapshotDao.findByVm(10L)).thenReturn(java.util.List.of(mock(com.cloud.vm.snapshot.VMSnapshotVO.class)));
+        assertThrows(InvalidParameterValueException.class, () -> operations.add(vm, volume));
+        assertThrows(InvalidParameterValueException.class, () -> operations.grow(volume, 150 * GIB));
+        assertThrows(InvalidParameterValueException.class, () -> operations.remove(vm, volume));
+        assertThrows(InvalidParameterValueException.class, () -> operations.move(volume, hdd));
+        assertThrows(InvalidParameterValueException.class, () -> operations.changeOffering(volume, standardHdd, null, true));
+        verifyNoInteractions(operations.extensionsManager);
     }
 
     @Test

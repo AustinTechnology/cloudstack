@@ -72,6 +72,14 @@ import com.cloud.agent.api.PlugNicCommand;
 import com.cloud.agent.api.UnPlugNicAnswer;
 import com.cloud.agent.api.UnPlugNicCommand;
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
+import com.cloud.agent.api.CreateVMSnapshotCommand;
+import com.cloud.agent.api.DeleteVMSnapshotCommand;
+import com.cloud.agent.api.RevertToVMSnapshotCommand;
+import com.cloud.agent.api.VMSnapshotBaseCommand;
+import com.cloud.agent.api.VMSnapshotTO;
+import com.cloud.vm.snapshot.VMSnapshot;
+import com.cloud.vm.snapshot.VMSnapshotVO;
+import com.cloud.vm.snapshot.dao.VMSnapshotDao;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
@@ -166,6 +174,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     ExternalInstanceLock instanceLock;
 
     @Inject
+    VMSnapshotDao vmSnapshotDao;
+
+    @Inject
     VMTemplateDao templateDao;
 
     private static final AtomicReference<Properties> propertiesRef = new AtomicReference<>();
@@ -202,6 +213,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             case "start": case "stop": case "reboot": case "setha": case "scale": case "plugnic": case "unplugnic": return action;
             case "adddisk": case "resizedisk": case "deletedisk": case "movedisk": return action;
             case "attachiso": case "detachiso": return action;
+            case "createsnapshot": return "create_snapshot";
+            case "revertsnapshot": return "restore_snapshot";
+            case "deletesnapshot": return "delete_snapshot";
             case "status": case "getconfig": case "getipaddress": case "ListSnapshots": return "";
             default: throw new IllegalArgumentException("Native adoption does not support action: " + action);
         }
@@ -1017,6 +1031,77 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         } catch (CloudRuntimeException e) {
             return new Pair<>(false, e.getMessage());
         }
+    }
+
+    /** How long a snapshot waits for a refresh or a disk change of the instance to finish. */
+    private static final int SNAPSHOT_LOCK_WAIT_SECONDS = 30;
+
+    @Override
+    public Answer changeInstanceSnapshot(String hostGuid, String extensionName, String extensionRelativePath, VMSnapshotBaseCommand cmd) {
+        String action = cmd instanceof CreateVMSnapshotCommand ? "createsnapshot" : cmd instanceof RevertToVMSnapshotCommand ? "revertsnapshot"
+                : cmd instanceof DeleteVMSnapshotCommand ? "deletesnapshot" : null;
+        if (action == null) {
+            return ExternalProvisioner.snapshotAnswer(cmd, false, null, null);
+        }
+        Pair<Boolean, String> result = changeInstanceSnapshot(hostGuid, extensionName, extensionRelativePath, cmd, action);
+        VirtualMachine.PowerState power = null;
+        if (result.first() && cmd instanceof RevertToVMSnapshotCommand) {
+            // Checked by the extension against the kind of snapshot: with memory the instance runs on, without it stays stopped.
+            power = cmd.getTarget().getType() == VMSnapshot.Type.DiskAndMemory ? VirtualMachine.PowerState.PowerOn : VirtualMachine.PowerState.PowerOff;
+        }
+        return ExternalProvisioner.snapshotAnswer(cmd, result.first(), result.second(), power);
+    }
+
+    /**
+     * The snapshot is held by the orchestrator under the name CloudStack gave it. It is taken and removed with
+     * the instance running or stopped. No disk change or refresh of the instance runs at the same time.
+     */
+    protected Pair<Boolean, String> changeInstanceSnapshot(String hostGuid, String extensionName, String extensionRelativePath,
+            VMSnapshotBaseCommand cmd, String action) {
+        String extensionPath = getExtensionCheckedPath(extensionName, extensionRelativePath);
+        if (StringUtils.isEmpty(extensionPath)) {
+            return new Pair<>(false, getExtensionConfigureError(extensionName, hostGuid));
+        }
+        HostVO host = hostDao.findByGuid(hostGuid);
+        UserVmVO userVm = getUserVmByInstanceName(cmd.getVmName());
+        VMSnapshotTO target = cmd.getTarget();
+        if (ObjectUtils.anyNull(host, userVm, target) || StringUtils.isEmpty(target.getSnapshotName()) || target.getType() == null) {
+            return new Pair<>(false, "Host, instance or snapshot not found");
+        }
+        Extension extension = host.getClusterId() == null ? null : extensionHelper.getExtensionForCluster(host.getClusterId());
+        if (extension == null || !extensionHelper.isInstanceSnapshotSupported(extension.getId())) {
+            return new Pair<>(false, "The instance's extension does not support instance snapshots.");
+        }
+        if (userVm.getState() != VirtualMachine.State.Stopped && userVm.getState() != VirtualMachine.State.Running) {
+            return new Pair<>(false, "Instance snapshots require a stopped or running instance.");
+        }
+        try {
+            return instanceLock.hold(userVm.getId(), SNAPSHOT_LOCK_WAIT_SECONDS, () -> {
+                VirtualMachineTO vmTO = getVirtualMachineTO(userVm);
+                Map<String, Map<String, String>> access = extensionsManager.getExternalAccessDetails(host, null);
+                access.put(ApiConstants.VIRTUAL_MACHINE, vmTO.getExternalDetails());
+                Map<String, Object> payload = loadAccessDetails(access, vmTO);
+                Map<String, Object> parameters = new HashMap<>();
+                parameters.put("snap_name", target.getSnapshotName());
+                parameters.put("snap_save_memory", String.valueOf(target.getType() == VMSnapshot.Type.DiskAndMemory));
+                if (cmd instanceof CreateVMSnapshotCommand) {
+                    parameters.put("snap_description", snapshotDescription(target));
+                }
+                payload.put(ApiConstants.PARAMETERS, parameters);
+                Pair<Boolean, String> result = executeExternalCommand(extensionName, action, payload, cmd.getWait(),
+                        "Failed to change an instance snapshot on the external system", extensionPath);
+                return result.first() ? result : new Pair<>(false, ExternalVolumeOperations.reason(result.second()));
+            });
+        } catch (CloudRuntimeException e) {
+            return new Pair<>(false, e.getMessage());
+        }
+    }
+
+    /** What the orchestrator shows for the snapshot: the name its owner gave it, and the owner's description. */
+    protected String snapshotDescription(VMSnapshotTO target) {
+        VMSnapshotVO snapshot = target.getId() == null || vmSnapshotDao == null ? null : vmSnapshotDao.findById(target.getId());
+        String name = snapshot == null ? null : snapshot.getDisplayName();
+        return Stream.of(name, target.getDescription()).filter(StringUtils::isNotBlank).distinct().collect(java.util.stream.Collectors.joining(": "));
     }
 
     protected Pair<Boolean, String> changeInstanceNic(String hostGuid, String extensionName, String extensionRelativePath,

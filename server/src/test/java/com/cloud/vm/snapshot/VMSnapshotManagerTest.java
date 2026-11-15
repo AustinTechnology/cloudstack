@@ -113,6 +113,8 @@ public class VMSnapshotManagerTest {
     @Mock
     HostDao _hostDao;
     @Mock
+    org.apache.cloudstack.extension.ExtensionHelper extensionHelper;
+    @Mock
     UserDao _userDao;
     @Mock
     AgentManager _agentMgr;
@@ -274,6 +276,32 @@ public class VMSnapshotManagerTest {
         when(vmMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.Ovm);
         when(_hypervisorCapabilitiesDao.isVmSnapshotEnabled(Hypervisor.HypervisorType.Ovm, "default")).thenReturn(false);
         _vmSnapshotMgr.allocVMSnapshot(TEST_VM_ID, "", "", true);
+    }
+
+    // An External instance has snapshots only when the extension of its cluster declares them
+    @Test
+    public void testAllocVMSnapshotExternalNeedsTheExtensionCapability() throws ResourceAllocationException {
+        _vmSnapshotMgr._hostDao = _hostDao;
+        _vmSnapshotMgr.extensionHelper = extensionHelper;
+        when(vmMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+        when(vmMock.getHostId()).thenReturn(null);
+        when(vmMock.getLastHostId()).thenReturn(9L);
+        com.cloud.host.HostVO host = mock(com.cloud.host.HostVO.class);
+        when(host.getClusterId()).thenReturn(3L);
+        when(_hostDao.findById(9L)).thenReturn(host);
+        when(extensionHelper.getExtensionIdForCluster(3L)).thenReturn(4L);
+        when(extensionHelper.isInstanceSnapshotSupported(4L)).thenReturn(false);
+        try {
+            _vmSnapshotMgr.allocVMSnapshot(TEST_VM_ID, "", "", false);
+            org.junit.Assert.fail("refusal expected");
+        } catch (InvalidParameterValueException expected) {
+            // not supported by the extension
+        }
+        // With the capability, the hypervisor capabilities table, which has no External row, is not asked.
+        when(extensionHelper.isInstanceSnapshotSupported(4L)).thenReturn(true);
+        when(_accountMgr.getAccount(1L)).thenReturn(accountVOMock);
+        _vmSnapshotMgr.allocVMSnapshot(TEST_VM_ID, "", "", false);
+        org.mockito.Mockito.verify(_hypervisorCapabilitiesDao, org.mockito.Mockito.never()).isVmSnapshotEnabled(Hypervisor.HypervisorType.External, "default");
     }
 
     // vm state not in [running, stopped] case

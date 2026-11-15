@@ -2203,7 +2203,10 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
             return false;
         }
 
-        if (State.Stopped.equals(vmInstance.getState())) {
+        // An External instance is never scaled while it runs. Its record can still follow CPU and memory its
+        // orchestrator already has, as after a revert to an Instance Snapshot with memory: the extension then
+        // has nothing to change, and it refuses any other change to a running instance.
+        if (State.Stopped.equals(vmInstance.getState()) || HypervisorType.External.equals(vmInstance.getHypervisorType())) {
             upgradeStoppedVirtualMachine(vmId, newServiceOfferingId, customParameters);
             return true;
         }

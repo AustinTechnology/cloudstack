@@ -1405,6 +1405,94 @@ public class ExternalPathPayloadProvisionerTest {
                 .executeExternalCommand(anyString(), anyString(), anyMap(), anyInt(), anyString(), anyString());
     }
 
+    private com.cloud.agent.api.VMSnapshotTO snapshotTarget(com.cloud.vm.snapshot.VMSnapshot.Type type) {
+        return new com.cloud.agent.api.VMSnapshotTO(31L, "i-2-1-VM_VS_20261115031522", type, null, "before the upgrade", false, null, true);
+    }
+
+    private org.mockito.ArgumentCaptor<Map> snapshotReadyInstance(VirtualMachine.State state, String action, Pair<Boolean, String> scriptResult) {
+        UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
+        when(userVm.getId()).thenReturn(7L);
+        when(userVm.getState()).thenReturn(state);
+        when(hostDao.findByGuid("External:guid").getClusterId()).thenReturn(3L);
+        doReturn(mock(VirtualMachineTO.class)).when(provisioner).getVirtualMachineTO(userVm);
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(4L);
+        when(extensionHelper.getExtensionForCluster(3L)).thenReturn(extension);
+        when(extensionHelper.isInstanceSnapshotSupported(4L)).thenReturn(true);
+        provisioner.instanceLock = mock(org.apache.cloudstack.hypervisor.external.storage.ExternalInstanceLock.class);
+        when(provisioner.instanceLock.hold(eq(7L), anyInt(), any())).thenAnswer(call -> ((java.util.function.Supplier<?>) call.getArgument(2)).get());
+        org.mockito.ArgumentCaptor<Map> payload = org.mockito.ArgumentCaptor.forClass(Map.class);
+        doReturn(scriptResult).when(provisioner).executeExternalCommand(
+                eq("test-extension"), eq(action), payload.capture(), anyInt(), anyString(), anyString());
+        return payload;
+    }
+
+    @Test
+    public void snapshotCommandsNameTheSnapshotAndAreAnsweredWithTheirOwnType() {
+        java.util.List<org.apache.cloudstack.storage.to.VolumeObjectTO> volumes = List.of(mock(org.apache.cloudstack.storage.to.VolumeObjectTO.class));
+        com.cloud.vm.snapshot.VMSnapshotVO record = mock(com.cloud.vm.snapshot.VMSnapshotVO.class);
+        when(record.getDisplayName()).thenReturn("pre-upgrade");
+        provisioner.vmSnapshotDao = mock(com.cloud.vm.snapshot.dao.VMSnapshotDao.class);
+        when(provisioner.vmSnapshotDao.findById(31L)).thenReturn(record);
+
+        org.mockito.ArgumentCaptor<Map> payload = snapshotReadyInstance(VirtualMachine.State.Running, "createsnapshot", new Pair<>(true, "{\"status\":\"success\"}"));
+        com.cloud.agent.api.CreateVMSnapshotCommand create = new com.cloud.agent.api.CreateVMSnapshotCommand("i-2-1-VM", "vm-uuid",
+                snapshotTarget(com.cloud.vm.snapshot.VMSnapshot.Type.DiskAndMemory), volumes, "Other");
+        Answer answer = provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", create);
+        assertTrue(answer.getResult());
+        assertEquals(volumes, ((com.cloud.agent.api.CreateVMSnapshotAnswer) answer).getVolumeTOs());
+        Map parameters = (Map) payload.getValue().get("parameters");
+        assertEquals("i-2-1-VM_VS_20261115031522", parameters.get("snap_name"));
+        assertEquals("true", parameters.get("snap_save_memory"));
+        assertEquals("pre-upgrade: before the upgrade", parameters.get("snap_description"));
+
+        payload = snapshotReadyInstance(VirtualMachine.State.Stopped, "revertsnapshot", new Pair<>(true, "{\"status\":\"success\"}"));
+        answer = provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", new com.cloud.agent.api.RevertToVMSnapshotCommand(
+                "i-2-1-VM", "vm-uuid", snapshotTarget(com.cloud.vm.snapshot.VMSnapshot.Type.Disk), volumes, "Other"));
+        assertTrue(answer.getResult());
+        assertEquals(VirtualMachine.PowerState.PowerOff, ((com.cloud.agent.api.RevertToVMSnapshotAnswer) answer).getVmState());
+        assertEquals("false", ((Map) payload.getValue().get("parameters")).get("snap_save_memory"));
+
+        snapshotReadyInstance(VirtualMachine.State.Stopped, "deletesnapshot", new Pair<>(true, "{\"status\":\"success\"}"));
+        answer = provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", new com.cloud.agent.api.DeleteVMSnapshotCommand(
+                "i-2-1-VM", snapshotTarget(com.cloud.vm.snapshot.VMSnapshot.Type.Disk), volumes, "Other"));
+        assertTrue(answer.getResult());
+        assertEquals(volumes, ((com.cloud.agent.api.DeleteVMSnapshotAnswer) answer).getVolumeTOs());
+    }
+
+    @Test
+    public void aSnapshotFailureCarriesTheExtensionsReasonInAnAnswerOfTheSameType() {
+        snapshotReadyInstance(VirtualMachine.State.Stopped, "revertsnapshot",
+                new Pair<>(false, "{\"status\":\"error\",\"error\":\"The instance has no snapshot of that name\"}"));
+        com.cloud.agent.api.RevertToVMSnapshotCommand revert = new com.cloud.agent.api.RevertToVMSnapshotCommand(
+                "i-2-1-VM", "vm-uuid", snapshotTarget(com.cloud.vm.snapshot.VMSnapshot.Type.Disk), List.of(), "Other");
+        Answer answer = provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", revert);
+        assertTrue(answer instanceof com.cloud.agent.api.RevertToVMSnapshotAnswer);
+        assertFalse(answer.getResult());
+        assertEquals("The instance has no snapshot of that name", answer.getDetails());
+
+        when(provisioner.instanceLock.hold(eq(7L), anyInt(), any())).thenThrow(new com.cloud.exception.InvalidParameterValueException("busy"));
+        answer = provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", revert);
+        assertFalse(answer.getResult());
+        assertEquals("busy", answer.getDetails());
+    }
+
+    @Test
+    public void aSnapshotIsRefusedWithoutTheCapabilityOrAStableInstance() {
+        snapshotReadyInstance(VirtualMachine.State.Running, "createsnapshot", new Pair<>(true, "{}"));
+        com.cloud.agent.api.CreateVMSnapshotCommand create = new com.cloud.agent.api.CreateVMSnapshotCommand("i-2-1-VM", "vm-uuid",
+                snapshotTarget(com.cloud.vm.snapshot.VMSnapshot.Type.Disk), List.of(), "Other");
+        when(extensionHelper.isInstanceSnapshotSupported(4L)).thenReturn(false);
+        Answer answer = provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", create);
+        assertTrue(answer instanceof com.cloud.agent.api.CreateVMSnapshotAnswer);
+        assertFalse(answer.getResult());
+
+        when(extensionHelper.isInstanceSnapshotSupported(4L)).thenReturn(true);
+        when(userVmDao.findById(7L).getState()).thenReturn(VirtualMachine.State.Migrating);
+        assertFalse(provisioner.changeInstanceSnapshot("External:guid", "test-extension", "test-extension.sh", create).getResult());
+        verify(provisioner, never()).executeExternalCommand(anyString(), anyString(), anyMap(), anyInt(), anyString(), anyString());
+    }
+
     private Answer getIpAddressWithScriptResult(Pair<Boolean, String> scriptResult) {
         UserVmVO userVm = mockInstanceOnHost("i-2-1-VM");
         VirtualMachineTO vmTO = mock(VirtualMachineTO.class);

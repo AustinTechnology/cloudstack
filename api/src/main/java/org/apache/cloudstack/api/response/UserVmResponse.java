@@ -393,6 +393,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
     @Param(description = "For an External Instance, true if its extension supports attaching and detaching ISOs.")
     private Boolean instanceIsoSupported;
 
+    @SerializedName(ExtensionHelper.INSTANCE_SNAPSHOT_SUPPORTED)
+    @Param(description = "For an External Instance, true if its extension supports Instance Snapshots.")
+    private Boolean instanceSnapshotSupported;
+
     @SerializedName(ApiConstants.DELETE_PROTECTION)
     @Param(description = "true if vm has delete protection.", since = "4.20.0")
     private boolean deleteProtection;
@@ -1198,6 +1202,10 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
 
     public void setInstanceIsoSupported(Boolean supported) {
         this.instanceIsoSupported = supported;
+    }
+
+    public void setInstanceSnapshotSupported(Boolean supported) {
+        this.instanceSnapshotSupported = supported;
     }
 
     public Boolean getInstanceScaleSupported() {

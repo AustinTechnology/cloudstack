@@ -213,7 +213,7 @@ export default {
             return args
           },
           show: (record) => {
-            return record.hypervisor !== 'External' && (((['Running'].includes(record.state) && record.hypervisor !== 'LXC') ||
+            return (record.hypervisor !== 'External' || record.instancesnapshotsupported === true) && (((['Running'].includes(record.state) && record.hypervisor !== 'LXC') ||
               (['Stopped'].includes(record.state) && (!['KVM', 'LXC'].includes(record.hypervisor) ||
               (record.hypervisor === 'KVM' && ['PowerFlex', 'Filesystem', 'NetworkFilesystem', 'SharedMountPoint'].includes(record.pooltype))))) && record.vmtype !== 'sharedfsvm')
           },

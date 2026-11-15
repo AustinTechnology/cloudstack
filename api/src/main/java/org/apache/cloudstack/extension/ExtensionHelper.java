@@ -66,6 +66,11 @@ public interface ExtensionHelper {
     /** Whether this enabled orchestrator can change the ISOs in the CD drives of its instances and create an instance from an ISO. */
     boolean isInstanceIsoSupported(long extensionId);
 
+    String INSTANCE_SNAPSHOT_SUPPORTED = "instancesnapshotsupported";
+
+    /** Whether this enabled orchestrator can take, revert to and delete snapshots of its whole instances. */
+    boolean isInstanceSnapshotSupported(long extensionId);
+
     /**
      * Network Guru of Network Extension
      */

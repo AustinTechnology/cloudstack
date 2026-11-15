@@ -132,6 +132,29 @@ public class ExternalResourceTest {
     }
 
     @Test
+    public void snapshotCommandsUseTheProvisionerAndAlwaysHaveTheAnswerTheStrategyCastsTo() {
+        ExternalProvisioner provisioner = readyResourceWithProvisioner();
+        com.cloud.agent.api.VMSnapshotTO target = new com.cloud.agent.api.VMSnapshotTO(1L, "i-2-1-VM_VS_1", com.cloud.vm.snapshot.VMSnapshot.Type.Disk, null, null, false, null, true);
+        com.cloud.agent.api.RevertToVMSnapshotCommand revert = new com.cloud.agent.api.RevertToVMSnapshotCommand("i-2-1-VM", "uuid", target, java.util.List.of(), "Other");
+        com.cloud.agent.api.CreateVMSnapshotCommand create = new com.cloud.agent.api.CreateVMSnapshotCommand("i-2-1-VM", "uuid", target, java.util.List.of(), "Other");
+        com.cloud.agent.api.DeleteVMSnapshotCommand delete = new com.cloud.agent.api.DeleteVMSnapshotCommand("i-2-1-VM", target, java.util.List.of(), "Other");
+        when(provisioner.changeInstanceSnapshot(any(), any(), any(), org.mockito.ArgumentMatchers.same(create)))
+                .thenReturn(ExternalProvisioner.snapshotAnswer(create, true, null, null));
+        assertTrue(((com.cloud.agent.api.CreateVMSnapshotAnswer) externalResource.executeRequest(create)).getResult());
+
+        when(provisioner.changeInstanceSnapshot(any(), any(), any(), org.mockito.ArgumentMatchers.same(revert))).thenThrow(new IllegalArgumentException("lost result"));
+        Answer answer = externalResource.executeRequest(revert);
+        assertTrue(answer instanceof com.cloud.agent.api.RevertToVMSnapshotAnswer);
+        assertFalse(answer.getResult());
+
+        ReflectionTestUtils.setField(externalResource, "extensionState", Extension.State.Disabled);
+        answer = externalResource.executeRequest(delete);
+        assertTrue(answer instanceof com.cloud.agent.api.DeleteVMSnapshotAnswer);
+        assertFalse(answer.getResult());
+        verify(provisioner, never()).changeInstanceSnapshot(any(), any(), any(), org.mockito.ArgumentMatchers.same(delete));
+    }
+
+    @Test
     public void persistentNetworkSetupHasTypedUnsupportedAnswer() {
         com.cloud.agent.api.SetupPersistentNetworkCommand cmd = new com.cloud.agent.api.SetupPersistentNetworkCommand(null);
         Answer answer = externalResource.executeRequest(cmd);

@@ -42,6 +42,10 @@ import com.cloud.agent.api.CheckNetworkCommand;
 import com.cloud.agent.api.CheckVirtualMachineAnswer;
 import com.cloud.agent.api.CheckVirtualMachineCommand;
 import com.cloud.agent.api.CleanupNetworkRulesCmd;
+import com.cloud.agent.api.CreateVMSnapshotCommand;
+import com.cloud.agent.api.DeleteVMSnapshotCommand;
+import com.cloud.agent.api.RevertToVMSnapshotCommand;
+import com.cloud.agent.api.VMSnapshotBaseCommand;
 import com.cloud.agent.api.Command;
 import com.cloud.agent.api.GetExternalConsoleAnswer;
 import com.cloud.agent.api.GetExternalConsoleCommand;
@@ -202,6 +206,8 @@ public class ExternalResource implements ServerResource {
                 return execute((AttachCommand) cmd);
             } else if (cmd instanceof DettachCommand && isIso(((DettachCommand) cmd).getDisk())) {
                 return execute((DettachCommand) cmd);
+            } else if (cmd instanceof CreateVMSnapshotCommand || cmd instanceof RevertToVMSnapshotCommand || cmd instanceof DeleteVMSnapshotCommand) {
+                return execute((VMSnapshotBaseCommand) cmd);
             } else {
                 return execute(cmd);
             }
@@ -213,6 +219,9 @@ public class ExternalResource implements ServerResource {
             }
             if (cmd instanceof UnPlugNicCommand) {
                 return new UnPlugNicAnswer((UnPlugNicCommand)cmd, false, "NIC_OUTCOME_UNKNOWN: " + e.getMessage());
+            }
+            if (cmd instanceof VMSnapshotBaseCommand) {
+                return ExternalProvisioner.snapshotAnswer((VMSnapshotBaseCommand) cmd, false, e.getMessage(), null);
             }
             return new Answer(cmd, false, e.getMessage());
         }
@@ -366,6 +375,13 @@ public class ExternalResource implements ServerResource {
             return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
         }
         return externalProvisioner.detachInstanceIso(guid, extensionName, extensionRelativePath, cmd);
+    }
+
+    public Answer execute(VMSnapshotBaseCommand cmd) {
+        if (isExtensionDisconnected() || isExtensionNotEnabled() || isExtensionPathNotReady()) {
+            return ExternalProvisioner.snapshotAnswer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError(), null);
+        }
+        return externalProvisioner.changeInstanceSnapshot(guid, extensionName, extensionRelativePath, cmd);
     }
 
     public PlugNicAnswer execute(PlugNicCommand cmd) {

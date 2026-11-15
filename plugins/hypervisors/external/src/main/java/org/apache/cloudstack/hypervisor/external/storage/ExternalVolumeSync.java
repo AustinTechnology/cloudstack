@@ -38,6 +38,7 @@ import com.cloud.event.EventTypes;
 import com.cloud.event.UsageEventUtils;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.storage.DiskOfferingVO;
+import com.cloud.storage.Storage.ImageFormat;
 import com.cloud.storage.VMTemplateVO;
 import com.cloud.storage.Volume;
 import com.cloud.storage.VolumeDetailVO;
@@ -270,6 +271,10 @@ public class ExternalVolumeSync {
             }
             if (!dryRun) {
                 saveSlot(volume.getId(), disk.device);
+                if (volume.getFormat() == null) {
+                    volume.setFormat(format(id));
+                    volumeDao.update(volume.getId(), volume);
+                }
             }
         }
         for (VolumeVO volume : recorded) {
@@ -329,9 +334,20 @@ public class ExternalVolumeSync {
                 vm.getDataCenterId(), HypervisorType.External, vm, template, accountService.getAccount(vm.getAccountId()), deviceId,
                 pool.getId(), pool.getPoolType(), id, null);
         VolumeVO volume = volumeDao.findById(profile.getVolumeId());
+        volume.setFormat(format(id));
+        volumeDao.update(volume.getId(), volume);
         volumeDetailsDao.addDetail(volume.getId(), SLOT_DETAIL, disk.device, false);
         publish(EventTypes.EVENT_VOLUME_CREATE, volume, volume.getSize());
         resourceLimits.incrementVolumeResourceCount(volume.getAccountId(), volume.isDisplayVolume(), volume.getSize(), offering);
+    }
+
+    /**
+     * Every volume has an image format: stock code that walks all volumes, such as the volume statistics task,
+     * does not expect one without. A disk at the orchestrator is raw unless its file says otherwise.
+     */
+    static ImageFormat format(String providerVolumeId) {
+        String id = providerVolumeId == null ? "" : providerVolumeId.toLowerCase();
+        return id.endsWith(".qcow2") ? ImageFormat.QCOW2 : id.endsWith(".vmdk") ? ImageFormat.VMDK : ImageFormat.RAW;
     }
 
     void resize(VolumeVO volume, long size) {
@@ -393,6 +409,7 @@ public class ExternalVolumeSync {
         volume.setPoolId(pool.getId());
         volume.setPoolType(pool.getPoolType());
         volume.setPath(path);
+        volume.setFormat(format(path));
         volume.setState(Volume.State.Ready);
         volumeDao.update(volume.getId(), volume);
         volumeDao.attachVolume(volume.getId(), vm.getId(), deviceId);
@@ -404,6 +421,7 @@ public class ExternalVolumeSync {
         volume.setPoolId(pool.getId());
         volume.setPoolType(pool.getPoolType());
         volume.setPath(path);
+        volume.setFormat(format(path));
         volume.setState(Volume.State.Ready);
         volumeDao.update(volume.getId(), volume);
         saveSlot(volume.getId(), device);
@@ -438,6 +456,7 @@ public class ExternalVolumeSync {
         volume.setPoolId(pool.getId());
         volume.setPoolType(pool.getPoolType());
         volume.setPath(path);
+        volume.setFormat(format(path));
         volume.setDiskOfferingId(offering.getId());
         volumeDao.update(volume.getId(), volume);
         if (previous == null || previous.getId() != offering.getId()) {
