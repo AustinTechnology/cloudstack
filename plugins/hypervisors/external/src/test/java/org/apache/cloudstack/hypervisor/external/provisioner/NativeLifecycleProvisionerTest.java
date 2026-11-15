@@ -114,17 +114,45 @@ public class NativeLifecycleProvisionerTest {
         verify(registry, never()).complete(any(), anyString(), anyString());
     }
 
-    @Test public void expungeRetiresTheClaimWithoutStartingTheExtension() throws Exception {
+    private AdoptionRegistry.Lease lease(String action) throws Exception {
+        java.lang.reflect.Constructor<AdoptionRegistry.Lease> ctor = AdoptionRegistry.Lease.class.getDeclaredConstructor(String.class, String.class, Timestamp.class);
+        ctor.setAccessible(true);
+        return ctor.newInstance(LEASE, action, new Timestamp(System.currentTimeMillis() + 600000));
+    }
+
+    @Test public void expungeDeletesAtTheOrchestratorUnderALeaseAndThenRetiresTheClaim() throws Exception {
+        when(registry.validatedState(any())).thenReturn("managed");
+        when(registry.acquire(any(), eq("delete"))).thenReturn(lease("delete"));
+        Path marker = dir.resolve("started");
+        String succeed = "touch " + marker + "; printf '%s' '{\"status\":\"success\"}'";
+        Pair<Boolean, String> result = provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script(succeed).toString());
+        assertTrue(result.second(), result.first());
+        assertTrue(Files.exists(marker));
+        Map<?, ?> context = (Map<?, ?>) provisioner.observed.get("native_adoption_context");
+        assertEquals("delete", context.get("operation")); assertEquals(LEASE, context.get("lease_id"));
+        verify(registry).completeDelete(any(), eq(LEASE));
+        verify(registry, never()).complete(any(), anyString(), anyString());
+    }
+
+    @Test public void aRepeatedExpungeOfADeletedInstanceSendsNothing() throws Exception {
+        when(registry.validatedState(any())).thenReturn("retiring");
         Path marker = dir.resolve("started");
         Pair<Boolean, String> result = provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("touch " + marker).toString());
         assertTrue(result.first());
         assertFalse(Files.exists(marker));
-        verify(registry).retire(any());
         verify(registry, never()).acquire(any(), anyString());
-        doThrow(new AdoptionRegistry.Conflict("claim cannot retire")).when(registry).retire(any());
-        try { provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("touch " + marker).toString()); fail("operating claim"); }
-        catch (AdoptionRegistry.Conflict expected) { }
-        assertFalse(Files.exists(marker));
+    }
+
+    @Test public void aDeleteThatFailsKnownOrUnknownNeverRetiresTheClaim() throws Exception {
+        when(registry.validatedState(any())).thenReturn("managed");
+        when(registry.acquire(any(), eq("delete"))).thenReturn(lease("delete"));
+        assertFalse(provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("exit 90").toString()).first());
+        verify(registry).abandon(any(), eq("delete"), eq(LEASE));
+        Pair<Boolean, String> unknown = provisioner.executeExternalCommand("test", "delete", payload, 5, "test", script("exit 1").toString());
+        assertFalse(unknown.first());
+        assertTrue(unknown.second(), unknown.second().contains("outcome is unknown"));
+        verify(registry, times(1)).abandon(any(), anyString(), anyString());
+        verify(registry, never()).completeDelete(any(), anyString());
     }
 
     @Test public void readonlyRequiresManagedWithoutLease() throws Exception {

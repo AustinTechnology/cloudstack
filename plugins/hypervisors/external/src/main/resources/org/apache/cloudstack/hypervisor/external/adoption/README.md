@@ -15,8 +15,9 @@ manifest SHA-256, CloudStack UUID and internal instance name. It deliberately
 does not include node: like the legacy lifecycle path, intra-cluster movement is
 possible. Dispatcher must independently establish current node and guarantee
 that the cluster/VMID in the identity is the actual actuator path. Available
-methods are `validatedState`, `acquire`, `assertLease`, `complete`, `retire`,
-and `finalizeRetirement`. A shared control-row lock serializes import and all
+methods are `validatedState`, `acquire`, `assertLease`, `complete`, `completeDelete`
+and `finalizeRetirement`. Expunge deletes an adopted instance at its orchestrator under a
+`delete` lease; `completeDelete` then leaves the claim retiring until the instance row is gone. A shared control-row lock serializes import and all
 these transactions. The exact operation token remains on the claim and in a
 uniquely claim-scoped lease row. Only the legacy managed actions are enabled.
 A callback must acquire before any mutation or credential issuance, recheck the

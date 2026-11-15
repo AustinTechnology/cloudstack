@@ -213,6 +213,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             case "start": case "stop": case "reboot": case "setha": case "scale": case "plugnic": case "unplugnic": return action;
             case "adddisk": case "resizedisk": case "deletedisk": case "movedisk": return action;
             case "attachiso": case "detachiso": return action;
+            case "delete": return action;
             case "createsnapshot": return "create_snapshot";
             case "revertsnapshot": return "restore_snapshot";
             case "deletesnapshot": return "delete_snapshot";
@@ -253,10 +254,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             adopted |= !field(vm, key).isEmpty();
         }
         if (!adopted) { return null; }
-        // Expunge of an adopted instance removes CloudStack records only. The claim is
-        // retired and the provider guest is kept, so nothing is sent to the provider.
-        boolean retire = "delete".equals(action);
-        String operation = retire ? "" : nativeOperation(action);
+        String operation = nativeOperation(action);
         if (wait <= 0 || wait > 6900) { throw new IllegalArgumentException("Native adoption wait must be 1..6900 seconds"); }
         String cluster = field(host, "proxmox_cluster");
         String vmCluster = field(vm, "proxmox_cluster");
@@ -289,8 +287,10 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                 identity.vmid, identity.manifestHash, manifest);
         AdoptionRegistry registry = adoptionRegistry();
         AdoptionRegistry.Lease lease = null;
-        if (retire) {
-            registry.retire(identity);
+        // Expunge deletes an adopted instance at its orchestrator, as an ordinary one. Once that has
+        // succeeded the claim is retiring, and a repeated expunge must send nothing: by then the
+        // orchestrator may have given the VMID to another guest.
+        if ("delete".equals(action) && "retiring".equals(registry.validatedState(identity))) {
             return new NativeOperation(registry, identity, null, true);
         }
         if (operation.isEmpty()) {
@@ -1456,7 +1456,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             payload.remove(NATIVE_CONTEXT);
             nativeOperation = prepareNativeOperation(action, payload, wait);
             if (nativeOperation != null && nativeOperation.retired) {
-                return new Pair<>(true, "{\"status\":\"success\",\"message\":\"Adoption claim retired; the provider instance is kept\"}");
+                return new Pair<>(true, "{\"status\":\"success\",\"message\":\"Instance already deleted\"}");
             }
             List<String> command = new ArrayList<>();
             command.add(executablePath.toString());
@@ -1514,7 +1514,11 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                     return nativeUncertainOutcome(action);
                 }
                 nativeOperation.registry.assertLease(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
-                nativeOperation.registry.complete(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
+                if ("delete".equals(nativeOperation.lease.action)) {
+                    nativeOperation.registry.completeDelete(nativeOperation.identity, nativeOperation.lease.id);
+                } else {
+                    nativeOperation.registry.complete(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
+                }
             }
             deleteExtensionPayloadFile(extensionName, action, dataFile);
             return new Pair<>(true, output.toString().trim());

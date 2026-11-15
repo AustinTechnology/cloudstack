@@ -53,7 +53,7 @@ public final class AdoptionRegistry {
     private static final Set<String> ACTIONS = new HashSet<>(Arrays.asList(
             "console", "start", "stop", "reboot", "create_snapshot", "restore_snapshot", "delete_snapshot",
             "setha", "scale", "plugnic", "unplugnic", "adddisk", "resizedisk", "deletedisk", "movedisk",
-            "attachiso", "detachiso"));
+            "attachiso", "detachiso", "delete"));
     private static final int LEASE_SECONDS = 7200;
 
     public static final class Conflict extends RuntimeException {
@@ -469,14 +469,24 @@ public final class AdoptionRegistry {
 
     /** Only after the entire actuator operation and required postcondition succeed. */
     public void complete(Identity i, String operation, String leaseId) {
+        finish(i, operation, leaseId, "managed");
+    }
+
+    /** The orchestrator has deleted the instance: the claim waits, retiring, for the CloudStack
+     * instance to be gone. Nothing may be sent to the orchestrator for a retiring claim. */
+    public void completeDelete(Identity i, String leaseId) {
+        finish(i, "delete", leaseId, "retiring");
+    }
+
+    private void finish(Identity i, String operation, String leaseId, String state) {
         action(operation); canonicalUuid(leaseId);
         transaction(c -> {
             lockControl(c); Claim claim = lockedClaim(c, i);
             if (!"operating".equals(claim.state) || !leaseId.equals(claim.lease)) { throw new Conflict("completion token is not current"); }
             requireLease(c, i, leaseId, operation, true);
-            try (PreparedStatement s = c.prepareStatement("UPDATE external_adoption_claims SET state='managed',operation_lease_id=NULL,updated_at=SYSDATE(6) WHERE id=? AND generation=? AND state='operating' AND operation_lease_id=? AND EXISTS (SELECT 1 FROM external_adoption_operation_leases l WHERE l.id=? AND l.claim_id=? AND l.generation=? AND l.action=? AND l.expires_at>SYSDATE(6))")) {
-                s.setString(1, i.claimId); s.setInt(2, i.generation); s.setString(3, leaseId); s.setString(4, leaseId);
-                s.setString(5, i.claimId); s.setInt(6, i.generation); s.setString(7, operation);
+            try (PreparedStatement s = c.prepareStatement("UPDATE external_adoption_claims SET state=?,operation_lease_id=NULL,updated_at=SYSDATE(6) WHERE id=? AND generation=? AND state='operating' AND operation_lease_id=? AND EXISTS (SELECT 1 FROM external_adoption_operation_leases l WHERE l.id=? AND l.claim_id=? AND l.generation=? AND l.action=? AND l.expires_at>SYSDATE(6))")) {
+                s.setString(1, state); s.setString(2, i.claimId); s.setInt(3, i.generation); s.setString(4, leaseId); s.setString(5, leaseId);
+                s.setString(6, i.claimId); s.setInt(7, i.generation); s.setString(8, operation);
                 if (s.executeUpdate() != 1) { throw new Conflict("completion lost its live fence"); }
             }
             try (PreparedStatement s = c.prepareStatement("DELETE FROM external_adoption_operation_leases WHERE id=? AND claim_id=? AND generation=? AND action=?")) {
@@ -503,20 +513,6 @@ public final class AdoptionRegistry {
             try (PreparedStatement s = c.prepareStatement("DELETE FROM external_adoption_operation_leases WHERE BINARY id=BINARY ? AND BINARY claim_id=BINARY ? AND generation=?")) {
                 s.setString(1, leaseId); s.setString(2, claimId); s.setInt(3, generation);
                 if (s.executeUpdate() != 1) { throw new Conflict("claim and lease row disagree"); }
-            }
-            return null;
-        });
-    }
-
-    /** Retire is metadata-only; even expired operating claims remain fenced. */
-    public void retire(Identity i) {
-        transaction(c -> {
-            lockControl(c); Claim claim = lockedClaim(c, i);
-            if ("retiring".equals(claim.state)) { return null; }
-            if (!("bound".equals(claim.state) || "managed".equals(claim.state))) { throw new Conflict("claim cannot retire"); }
-            try (PreparedStatement s = c.prepareStatement("UPDATE external_adoption_claims SET state='retiring',updated_at=SYSDATE(6) WHERE id=? AND generation=? AND state=? AND operation_lease_id IS NULL")) {
-                s.setString(1, i.claimId); s.setInt(2, i.generation); s.setString(3, claim.state);
-                if (s.executeUpdate() != 1) { throw new Conflict("retirement lost its fence"); }
             }
             return null;
         });

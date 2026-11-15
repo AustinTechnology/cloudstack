@@ -166,7 +166,7 @@ What a refresh or adoption then does, for each disk in the guest's configuration
 - Limits never stop a disk being recorded. An account that lands over a limit is named in the response, in the dry run too.
 - The dry run of both calls lists exactly what would be recorded and writes nothing.
 
-Removing the instance removes its volume records, counts and usage with it. An adopted guest and its disks stay at Proxmox; a guest CloudStack deployed is destroyed with its disks, as before.
+Removing the instance removes its volume records, counts and usage with it. The guest is destroyed at Proxmox with its disks, adopted or not (changed 15 Nov 2026: before that an adopted guest and its disks stayed at Proxmox; see "Expunge of an adopted instance").
 
 The ordinary volume API on these volumes: detach, extract, snapshot and snapshot schedule are refused before anything is recorded; resize, migrate, delete, attach elsewhere and reinstall were already refused. Making a template from the root disk of a stopped guest fails at the host and leaves nothing behind.
 
@@ -293,7 +293,7 @@ CloudStack's own Instance Snapshots (`createVMSnapshot`, `revertToVMSnapshot`, `
 
 What an instance with snapshots can no longer do, as for every other hypervisor: add or remove a NIC (stock check), and change its disks. `adddisk`, `resizedisk`, `deletedisk`, `movedisk` and a tier change are refused, by CloudStack while it records a snapshot of the instance, and by the extension while Proxmox holds any snapshot of it, including one CloudStack does not record. The reason is the same in both: Proxmox keeps the image of a deleted disk, will not move a disk, and a revert undoes whatever was done since. CPU and memory may still be changed with the instance stopped; a revert brings back those of the snapshot, in Proxmox and in the record.
 
-Destroy leaves the snapshots, as for VMware; expunge removes the records without a call per snapshot. Proxmox destroys an ordinary instance's snapshots with the instance. An adopted instance is kept in Proxmox with its snapshots.
+Destroy leaves the snapshots, as for VMware; expunge removes the records without a call per snapshot. Proxmox destroys the instance's snapshots with the instance, adopted or not.
 
 Changed outside the plugin: `VMSnapshotManagerImpl` (the two refusals became the capability check; the hypervisor capabilities table has no External row and is not asked), `VMSnapshotHelperImpl` (the host for an External instance is its own host or, when that is down, another of its cluster: its storage is zone-wide and says nothing of the cluster), `VirtualMachineManagerImpl` (snapshots on destroy, as VMware), `UserVmManagerImpl` (see the first finding), `UserVmResponse`/`UserVmJoinDaoImpl` (the capability), `ui/src/config/section/compute.js` (the button).
 
@@ -312,7 +312,7 @@ Live in the lab (jar `snap-f`, extension script `c86e59d7`):
 | Running: memory snapshot at 1/256, stop, scale to 2/512, start, revert | Pass after the change below; the record and the counts are back at 1/256 |
 | HA-managed adopted guest (qcow2 on NFS): both kinds, revert to memory while running, revert without memory while stopped | Pass; the HA service stays `started` (or `stopped`) throughout; no HA work in CloudStack |
 | Ordinary instance on the second cluster with VMID 100, which the first cluster also uses on the same Ceph pools: both kinds, revert, then expunge with both snapshots present | One destroy task. Its image, the image's snapshots and the memory state image are gone. The first cluster's guest 100 keeps its two images and keeps running in the same process |
-| Adopted instance with both kinds of snapshot: expunge its records | The records and counts are gone; the claim is released; Proxmox keeps the guest, stopped, with both snapshots |
+| Adopted instance with both kinds of snapshot: expunge its records (build `snap-f`, superseded below) | The records and counts are gone; the claim is released; Proxmox keeps the guest, stopped, with both snapshots |
 | The same guest adopted again | A disk add is refused by the extension: "The instance has snapshots in Proxmox; its disks cannot be changed until they are deleted" |
 | Every guest afterwards | Refresh (dry run) reports no change; account counts equal the volumes; no snapshot records, no RBD snapshots or state images left; four claims managed, no lease, no fence |
 
@@ -357,3 +357,27 @@ Tests: 783 Java, 77 extension, 9 getconfig, and 11 checks of when the UI offers 
 - Whether the nine disks on storages with no tier get an offering.
 - What each account's limits are raised to before the import.
 - Per-disk Ceph snapshots: the Ceph client's capabilities, how CloudStack's snapshot calls reach the extension, and what happens when Proxmox moves or deletes a snapshotted disk.
+
+## Expunge of an adopted instance (15 Nov 2026, lab only)
+
+Decision: once adopted, an instance is treated as an ordinary one wherever possible. Expunging it in CloudStack deletes it at Proxmox: the guest, every disk in its configuration (including ones CloudStack does not record: EFI, TPM, disks on storage without a tier) and its snapshots. Before this an adopted guest was kept.
+
+How:
+
+- The delete runs under a `delete` lease on the claim, like every other change. When Proxmox confirms the guest is gone the claim becomes `retiring`, and `released` once the instance row is gone (next host poll).
+- The extension deletes only when the VMID still holds the guest that was adopted (its name is the one in the claim), it is stopped, and it is neither locked nor a template. Otherwise it refuses and nothing is deleted. It then removes the HA resource and destroys the guest, the same two calls an ordinary instance gets, and never asks Proxmox to destroy unreferenced disks.
+- A refusal or a failed Proxmox task releases the lease. An answer that does not arrive keeps it: the operator inspects Proxmox, releases the lease, and expunges again; a guest already gone needs no further call.
+- Once a claim is `retiring` a repeated expunge sends nothing, because Proxmox may since have given the VMID to another guest.
+- Stock order is unchanged: CloudStack removes the instance's NIC and volume records and counts before it asks the hypervisor to delete. So after a refused or failed delete the instance is left in Error or Expunging with those records already gone, as for an ordinary External instance. Expunge it again once the cause is fixed.
+
+There is no longer a way to take an adopted guest out of CloudStack and keep it in Proxmox. If that is needed it has to be built (the stock name for it is "unmanage").
+
+Lab results (jar `adel-a`, extension script `42765d86`; 785 unit tests, 81 extension tests, 9 getconfig tests):
+
+| Case | Result |
+|---|---|
+| Running adopted guest, second cluster, VMID 104 (also an adopted guest of the first cluster), disks on both Ceph pools, a Proxmox snapshot and a CloudStack snapshot with memory: destroy with expunge | Guest, both images, the memory image and the snapshots gone; records and counts gone; claim `retiring`, `released` within ninety seconds; the first cluster's 104 ran on in the same process |
+| The same VMID holding a guest of another name | Refused, nothing deleted, lease released. The guest had already been stopped and its volume and NIC records removed (stock order) |
+| Delete runs, answer lost | Job fails as unknown; lease kept; a second expunge is refused and sends nothing; after the operator releases the lease the next expunge finds nothing to delete and completes |
+| HA-managed adopted guest, first cluster | HA resource removed, guest destroyed; the other HA guest untouched |
+
