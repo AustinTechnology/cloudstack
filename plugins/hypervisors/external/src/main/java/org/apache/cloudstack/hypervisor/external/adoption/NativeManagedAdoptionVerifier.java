@@ -305,15 +305,14 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
             NetworkVO network = networkDao.findById(nic.getNetworkId());
             if (p == null || network == null || network.getRemoved() != null || network.getId() != nic.getNetworkId()
                     || network.getDataCenterId() != vm.getDataCenterId() || network.getTrafficType() != TrafficType.Guest
-                    || nic.getBroadcastUri() == null
-                    || network.getBroadcastUri() == null || !nic.getBroadcastUri().equals(network.getBroadcastUri())) {
+                    || org.apache.cloudstack.hypervisor.external.observation.ObservationValidation.vlanUri(nic.getBroadcastUri(), network.getBroadcastUri()) == null) {
                 throw fail("native and provider NIC topology differs");
             }
             AccountVO owner = accountDao.findById(vm.getAccountId());
             if (accountService == null || owner == null || owner.getRemoved() != null) throw fail("unsupported: network access service unavailable");
             try { accountService.checkAccess(owner, AccessType.UseEntry, false, network); }
             catch (RuntimeException e) { throw fail("unsupported or denied native network access"); }
-            String uri = nic.getBroadcastUri().toString();
+            String uri = network.getBroadcastUri().toString();
             if (!uri.matches("vlan://[1-9][0-9]{0,3}")) throw fail("only tagged VLAN NICs are supported");
             int vlan = Integer.parseInt(uri.substring(7));
             if (vlan > 4094 || !Objects.equals(p.vlan, vlan) || !bridge.equals(p.bridge)) throw fail("NIC bridge or VLAN mismatch");

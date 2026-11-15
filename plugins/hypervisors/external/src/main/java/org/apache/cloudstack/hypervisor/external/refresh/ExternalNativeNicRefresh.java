@@ -206,10 +206,9 @@ final class ExternalNativeNicRefresh {
                     || !mac.equals(lockedMac)
                     || network.getGuestType() != Network.GuestType.L2 || network.getTrafficType() != TrafficType.Guest
                     || network.getAccountId() != vm.getAccountId() || network.getDataCenterId() != vm.getDataCenterId()
-                    || nic.getBroadcastUri() == null || network.getBroadcastUri() == null
-                    || !nic.getBroadcastUri().equals(network.getBroadcastUri()) || hostBridge == null
+                    || ObservationValidation.vlanUri(nic.getBroadcastUri(), network.getBroadcastUri()) == null || hostBridge == null
                     || !hostBridge.equals(provider.bridge) || provider.vlan == null
-                    || !nic.getBroadcastUri().toString().equals("vlan://" + provider.vlan)
+                    || !network.getBroadcastUri().toString().equals("vlan://" + provider.vlan)
                     || !subnetAllows(network, nic, address)) {
                 unresolved.add("NIC network or subnet mismatch: " + mac); continue;
             }

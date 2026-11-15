@@ -36,6 +36,8 @@ public class NativeObservationBindingResolverTest {
         }
         @Override Long uniqueVm(long cluster, int vmid) { return unique; }
         @Override String networkUuid(long id, String uri) { return network; }
+        String networkUri = "vlan://100";
+        @Override String networkBroadcastUri(long id) { return networkUri; }
     }
     private static final String SNAPSHOT = "{\"status\":\"success\",\"identity\":{\"cluster\":\"P2\",\"vmid\":100,\"name\":\"i-2-7-VM\",\"node\":\"pve1\"},"
             + "\"power\":\"running\",\"config_digest\":\"0123456789012345678901234567890123456789\",\"cpus\":2,\"memory_mb\":2048,\"agent_available\":false,"
@@ -62,6 +64,11 @@ public class NativeObservationBindingResolverTest {
         ObservationBindingResolver.Binding b=r.source(2,3,100,"02:00:00:00:00:01"); assertNotNull(b);
         assertEquals(b.fingerprint,r.current(7,"02:00:00:00:00:01").fingerprint);
         assertNull(r.source(2,4,100,"02:00:00:00:00:01"));
+        // A NIC released by a stop has no broadcast URI of its own; its network's stands. One that disagrees does not.
+        when(nic.getBroadcastUri()).thenReturn(null); assertNotNull(r.current(7,"02:00:00:00:00:01"));
+        r.networkUri = "vlan://101"; assertNull(r.current(7,"02:00:00:00:00:01"));
+        when(nic.getBroadcastUri()).thenReturn(URI.create("vlan://100")); assertNull(r.current(7,"02:00:00:00:00:01"));
+        r.networkUri = "vlan://100";
         when(answer.getDetails()).thenReturn(SNAPSHOT.replace("vmbr0","vmbr1")); assertNull(r.current(7,"02:00:00:00:00:01"));
         when(answer.getDetails()).thenReturn(SNAPSHOT.replace("i-2-7-VM","different")); assertNull(r.current(7,"02:00:00:00:00:01"));
         when(answer.getDetails()).thenReturn(SNAPSHOT); r.isAdopted=true; assertNull(r.current(7,"02:00:00:00:00:01"));

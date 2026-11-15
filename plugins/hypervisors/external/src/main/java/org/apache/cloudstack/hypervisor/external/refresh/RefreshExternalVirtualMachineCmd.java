@@ -27,7 +27,7 @@ import com.cloud.user.Account;
 
 @APICommand(name = "refreshExternalVirtualMachine", description = "Read fresh external instance configuration and optionally reconcile supported metadata",
         responseObject = ExternalVmRefreshResponse.class, responseHasSensitiveInfo = false,
-        authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin, RoleType.User}, since = "4.23.0")
+        authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin}, since = "4.23.0")
 public class RefreshExternalVirtualMachineCmd extends BaseCmd {
     @Inject ExternalVmRefreshManager manager;
     @Parameter(name = ApiConstants.ID, type = CommandType.UUID, entityType = UserVmResponse.class, required = true,

@@ -114,6 +114,14 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
             return b != null && b.clusterId == clusterId && b.hostId == hostId && b.vmid == vmid ? b : null;
         } catch (Exception e) { return null; }
     }
+    String networkBroadcastUri(long id) throws Exception {
+        TransactionLegacy t = TransactionLegacy.open("observationNetworkUri");
+        try (PreparedStatement s = t.getConnection().prepareStatement("SELECT broadcast_uri FROM networks WHERE id=? AND removed IS NULL")) {
+            s.setLong(1, id);
+            try (ResultSet r = s.executeQuery()) { return r.next() ? r.getString(1) : null; }
+        } finally { t.close(); }
+    }
+
     String networkUuid(long id, String uri) throws Exception {
         TransactionLegacy t = TransactionLegacy.open("observationNetworkLookup");
         try (PreparedStatement s = t.getConnection().prepareStatement("SELECT uuid,broadcast_uri FROM networks WHERE id=? AND removed IS NULL")) {
@@ -154,8 +162,9 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
                     selected = n;
                 }
             }
-            if (selected == null || selected.getBroadcastUri() == null) return null;
-            String uri = selected.getBroadcastUri().toString();
+            if (selected == null) return null;
+            String uri = ObservationValidation.vlanUri(selected.getBroadcastUri(), networkBroadcastUri(selected.getNetworkId()));
+            if (uri == null) return null;
             if (!uri.matches("vlan://([1-9][0-9]{0,3})")) return null;
             int vlan = Integer.parseInt(uri.substring(7));
             if (vlan < 1 || vlan > 4094) return null;

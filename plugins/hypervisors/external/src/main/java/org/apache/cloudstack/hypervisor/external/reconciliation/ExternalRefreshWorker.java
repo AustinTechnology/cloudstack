@@ -65,6 +65,8 @@ public class ExternalRefreshWorker extends ManagerBase implements Configurable {
     private ScheduledExecutorService executor;
     private long cursor;
     private long lastRun;
+    /** A pass over every instance is under way: the next tick continues it rather than waiting a whole interval. */
+    private boolean midPass;
 
     @Override public String getConfigComponentName() { return getClass().getSimpleName(); }
     @Override public ConfigKey<?>[] getConfigKeys() { return new ConfigKey<?>[]{ENABLED, INTERVAL, CLUSTER_ENABLED}; }
@@ -90,9 +92,11 @@ public class ExternalRefreshWorker extends ManagerBase implements Configurable {
             Integer interval = INTERVAL.value();
             if (interval == null || interval < 30 || interval > 86400) return;
             long now = System.nanoTime();
-            if (lastRun != 0 && now - lastRun < TimeUnit.SECONDS.toNanos(interval)) return;
-            lastRun = now;
-            runOnce();
+            if (!midPass) {
+                if (lastRun != 0 && now - lastRun < TimeUnit.SECONDS.toNanos(interval)) return;
+                lastRun = now;
+            }
+            midPass = runOnce();
         } catch (Exception e) { LOG.warn("External periodic refresh: scheduler failure"); }
     }
     boolean enabled() { return Boolean.TRUE.equals(ENABLED.value()); }
@@ -220,16 +224,23 @@ public class ExternalRefreshWorker extends ManagerBase implements Configurable {
                 && hasAdoptionMarker(vm.getId()) == hasClaim(vm.getUuid(), vm.getInstanceName(), cluster, vmid);
     }
     void apply(VMInstanceVO vm) { refresh.refresh(vm.getId(), false); }
-    void runOnce() {
-        if (!enabled()) return;
+    /** Why a refresh failed, short and on one line. The refresh's own messages name no secret. */
+    static String reason(Exception e) {
+        String text = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
+        text = text.replaceAll("\\p{Cntrl}", " ");
+        return text.length() > 200 ? text.substring(0, 200) : text;
+    }
+    /** Refreshes up to a batch of instances. True when the pass over all of them is not finished. */
+    boolean runOnce() {
+        if (!enabled()) return false;
         try (Lock guard = lock()) {
-            if (!guard.acquire() || !enabled()) return;
+            if (!guard.acquire() || !enabled()) return false;
             registerContext();
             try {
                 long deadline = now() + MAX_NANOS;
                 int ok = 0, skipped = 0, failed = 0, examined = 0;
                 List<VMInstanceVO> rows = page(cursor);
-                if (rows.isEmpty()) { cursor = 0; return; }
+                if (rows.isEmpty()) { cursor = 0; return false; }
                 for (VMInstanceVO vm : rows) {
                     if (now() - deadline >= 0 || !enabled() || Thread.currentThread().isInterrupted()) break;
                     cursor = vm.getId(); examined++;
@@ -240,12 +251,13 @@ public class ExternalRefreshWorker extends ManagerBase implements Configurable {
                         failed++;
                         String uuid;
                         try { uuid = UUID.fromString(vm.getUuid()).toString(); } catch (Exception ignored) { uuid = "invalid"; }
-                        LOG.warn("External periodic refresh vm={} category=failed", uuid);
+                        LOG.warn("External periodic refresh vm={} category=failed reason={}", uuid, reason(e));
                     }
                 }
                 if (rows.size() < BATCH && examined == rows.size()) cursor = 0;
-                LOG.info("External periodic refresh examined={} succeeded={} skipped={} failed={}", examined, ok, skipped, failed);
+                LOG.info("External periodic refresh examined={} succeeded={} skipped={} failed={} more={}", examined, ok, skipped, failed, cursor != 0);
+                return cursor != 0;
             } finally { unregisterContext(); }
-        } catch (Exception e) { LOG.warn("External periodic refresh category=run_failed"); }
+        } catch (Exception e) { LOG.warn("External periodic refresh category=run_failed reason={}", reason(e)); return false; }
     }
 }

@@ -78,6 +78,24 @@ public class ExternalRefreshWorkerTest {
         h.runOnce();
         assertEquals(2, h.calls.get()); assertEquals(1, h.contexts.get()); assertEquals(1, h.cleanups.get()); assertFalse(h.shared.get());
     }
+    @Test public void aPassLongerThanOneRunContinuesAtTheNextTickThenWaitsTheInterval() {
+        Harness h = new Harness();
+        List<VMInstanceVO> full = new java.util.ArrayList<>();
+        for (long i = 1; i <= ExternalRefreshWorker.BATCH; i++) full.add(vm(i));
+        h.rows = full;
+        h.tick(); h.tick();
+        assertEquals(2 * ExternalRefreshWorker.BATCH, h.calls.get());
+        h.rows = List.of(vm(1));
+        h.tick();
+        assertEquals(2 * ExternalRefreshWorker.BATCH + 1, h.calls.get());
+        h.tick();
+        assertEquals(2 * ExternalRefreshWorker.BATCH + 1, h.calls.get());
+    }
+    @Test public void theReasonForAFailureIsOneShortLine() {
+        String r = ExternalRefreshWorker.reason(new IllegalStateException("line one\nline two " + "x".repeat(300)));
+        assertTrue(r.startsWith("IllegalStateException: line one line two"));
+        assertEquals(200, r.length());
+    }
     @Test public void overlappingManagementRunsAreExcluded() throws Exception {
         Harness first = new Harness(), second = new Harness();
         first.shared = second.shared; first.rows = second.rows = List.of(vm(1));

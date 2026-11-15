@@ -8,6 +8,17 @@ import java.util.Locale;
 
 public final class ObservationValidation {
     private ObservationValidation() { }
+
+    /**
+     * A NIC's VLAN as CloudStack records it. The NIC keeps a copy of its network's broadcast URI only while it is
+     * reserved: a stop through CloudStack releases it and clears the copy, and NICs recorded by the legacy sync never
+     * had one. The network's URI then stands. Null when the two disagree or the network has none.
+     */
+    public static String vlanUri(Object nicUri, Object networkUri) {
+        if (networkUri == null) return null;
+        String network = networkUri.toString();
+        return nicUri == null || nicUri.toString().equals(network) ? network : null;
+    }
     public static String mac(String value) {
         if (value == null || !value.matches("(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}")) {
             throw new IllegalArgumentException("invalid MAC");

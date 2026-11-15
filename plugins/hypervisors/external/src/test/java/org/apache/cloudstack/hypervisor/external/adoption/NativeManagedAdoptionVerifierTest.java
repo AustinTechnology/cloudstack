@@ -211,6 +211,7 @@ public class NativeManagedAdoptionVerifierTest {
     @Test public void wrongProviderNodeRejected() { when(answer.getDetails()).thenReturn(SNAP.replace("\"node\":\"new\"", "\"node\":\"other\"")); rejected(this::run, "current node"); }
     @Test public void projectAccountsRejected() { when(account.getType()).thenReturn(Account.Type.PROJECT); rejected(this::run, "project-owned"); }
     @Test public void providerNicMismatchRejected() { when(nic.getMacAddress()).thenReturn("02:00:00:00:00:02"); rejected(this::run, "topology"); }
+    @Test public void aNicReleasedByAStopTakesItsNetworksVlan() { when(nic.getBroadcastUri()).thenReturn(null); run(); }
     @Test public void nativeNetworkVlanMustAgree() { when(network.getBroadcastUri()).thenReturn(URI.create("vlan://43")); rejected(this::run, "topology"); }
     @Test public void stoppedVmUsesLastHost() { when(vm.getState()).thenReturn(VirtualMachine.State.Stopped); when(vm.getHostId()).thenReturn(null); when(vm.getLastHostId()).thenReturn(10L); when(answer.getDetails()).thenReturn(SNAP.replace("\"power\":\"running\"", "\"power\":\"stopped\"")); run(); }
     @Test public void wrongClaimAndWrongOwnerAreRejected() { detail("adopt_claim_id", VM); rejected(this::run, "claim_id"); detail("adopt_claim_id", CLAIM); when(account.getAccountName()).thenReturn("other"); rejected(this::run, "admin account"); }
