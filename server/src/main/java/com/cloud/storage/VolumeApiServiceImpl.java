@@ -3047,6 +3047,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
         if (HypervisorType.External.equals(rootDiskHyperType)) {
             // There is no detached disk to attach: the orchestrator creates the disk on the instance.
+            _accountMgr.checkAccess(caller, null, true, volumeToAttach, vm);
             return externalInstanceDisks.add(vm, _volsDao.findById(volumeId));
         }
 
@@ -3782,6 +3783,11 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
         HypervisorType hypervisorType = _volsDao.getHypervisorType(volumeId);
         if (HypervisorType.External.equals(hypervisorType) || externalInstanceOf(vol) != null) {
+            // Choosing the pool is for the root admin; the owner changes tier with changeOfferingForVolume
+            if (!_accountMgr.isRootAdmin(caller.getId())) {
+                throw new PermissionDeniedException("Only the root admin can move an External disk to a chosen storage pool; "
+                        + "change the volume's disk offering to change its tier");
+            }
             StoragePoolVO destination = _storagePoolDao.findById(storagePoolId);
             if (destination == null) {
                 throw new InvalidParameterValueException("Failed to find the destination storage pool: " + storagePoolId);
@@ -4629,6 +4635,14 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             return false;
         }
         _accountMgr.checkAccess(caller, null, true, volume);
+        // Everything that would refuse the delete is checked before the disk is removed at the orchestrator
+        if (volume.isDeleteProtection()) {
+            throw new InvalidParameterValueException(String.format(
+                    "Volume [id = %s, name = %s] has delete protection enabled and cannot be deleted.", volume.getUuid(), volume.getName()));
+        }
+        if (!_snapshotMgr.canOperateOnVolume(volume)) {
+            throw new InvalidParameterValueException("There are snapshot operations in progress on the volume, unable to delete it");
+        }
         externalInstanceDisks.remove(vm, volume);
         return true;
     }

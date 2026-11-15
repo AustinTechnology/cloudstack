@@ -1479,11 +1479,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             if (nativeOperation != null && nativeOperation.lease != null) { nativeProcess = process; }
             boolean finished = process.waitFor(wait, TimeUnit.SECONDS);
             if (!finished) {
-                if (nativeOperation != null && nativeOperation.lease != null) {
-                    // Stop already spawned transports as well as their shell; an
-                    // unknown outcome still retains the durable operating fence.
-                    process.descendants().forEach(ProcessHandle::destroyForcibly);
-                }
+                // Stop what the script started (transports, qemu-img) as well as the script; for a native
+                // operation an unknown outcome still retains the durable operating fence.
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
                 process.destroyForcibly();
                 logger.error("{}: External API execution timed out after {} seconds", errorLogPrefix, wait);
                 return nativeProcess == null ? new Pair<>(false, "Timeout") : nativeUncertainOutcome(action);

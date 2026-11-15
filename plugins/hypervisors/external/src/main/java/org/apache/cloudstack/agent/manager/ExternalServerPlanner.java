@@ -80,7 +80,8 @@ public class ExternalServerPlanner extends AdapterBase implements DeploymentPlan
         return clusterIds.stream().filter(clusterId -> {
             Long id = extensionHelper.getExtensionIdForCluster(clusterId);
             ExtensionVO extension = id == null ? null : extensionDao.findById(id);
-            return extension != null && extension.isPathReady() && extensionHelper.isInstanceIsoSupported(id);
+            return extension != null && Extension.State.Enabled.equals(extension.getState()) && extension.isPathReady()
+                    && extensionHelper.isInstanceIsoSupported(id);
         }).collect(Collectors.toList());
     }
 
