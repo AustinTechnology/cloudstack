@@ -32,5 +32,6 @@
     <bean id="ExternalPrimaryDataStoreDriver" class="org.apache.cloudstack.hypervisor.external.storage.ExternalPrimaryDataStoreDriver" />
     <bean id="ExternalStorageHostListener" class="org.apache.cloudstack.hypervisor.external.storage.ExternalStorageHostListener" />
     <bean id="ExternalPrimaryDataStoreProvider" class="org.apache.cloudstack.hypervisor.external.storage.ExternalPrimaryDataStoreProvider" />
+    <bean id="ExternalSnapshotBackup" class="org.apache.cloudstack.hypervisor.external.storage.ExternalSnapshotBackup" />
 
 </beans>

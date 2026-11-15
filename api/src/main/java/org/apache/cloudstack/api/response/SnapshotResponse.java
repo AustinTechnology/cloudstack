@@ -119,6 +119,10 @@ public class SnapshotResponse extends BaseResponseWithTagInformation implements 
     @Param(description = "name of the availability zone")
     private String zoneName;
 
+    @SerializedName(ApiConstants.HYPERVISOR)
+    @Param(description = "Hypervisor of the volume the Snapshot is of, when it is External: such a Snapshot cannot become a volume or a Template")
+    private String hypervisor;
+
     @SerializedName(ApiConstants.REVERTABLE)
     @Param(description = "Indicates whether the underlying storage supports reverting the volume to this Snapshot")
     private boolean revertable;
@@ -280,6 +284,10 @@ public class SnapshotResponse extends BaseResponseWithTagInformation implements 
 
     public void setTags(Set<ResourceTagResponse> tags) {
         this.tags = tags;
+    }
+
+    public void setHypervisor(String hypervisor) {
+        this.hypervisor = hypervisor;
     }
 
     public void setRevertable(boolean revertable) {

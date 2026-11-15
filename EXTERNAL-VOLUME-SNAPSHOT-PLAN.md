@@ -1,74 +1,86 @@
-# External volume snapshots on Ceph (phase 4): findings and plan
+# External volume snapshots on Ceph (phase 4)
 
-Status: investigated 15 Nov 2026 in the lab and, read-only, in production. Nothing is built. Three decisions are needed before building; they are at the end.
+Status: built and tested in the lab, 15 Nov 2026. Not in production. Lab build `vsnap-c`.
 
 ## What it gives
 
-CloudStack's own volume snapshots (API and UI: take, list, delete, revert, and snapshot schedules) for a disk of an External instance that is an RBD image. The snapshot is a Ceph snapshot of that one image. It stays on Ceph; nothing is copied to secondary storage.
+CloudStack's own volume snapshots for a disk of an External instance that is an RBD image: take, list, delete, revert, download, and snapshot schedules with retention, through the stock API and UI. Disks that are not on Ceph (NFS, node-local) get no volume snapshots, and say so.
 
-Disks that are not on Ceph (NFS, node-local) get no volume snapshots.
+It behaves as stock KVM on Ceph does:
 
-## Findings
+- The snapshot is a Ceph snapshot of that one image, taken with the guest running or stopped (crash-consistent when running).
+- With `snapshot.backup.to.secondary=true` (production's setting) it is then copied to secondary storage as a qcow2 file, in the stock place (`snapshots/<account>/<volume>/<snapshot uuid>`), and also stays on Ceph. With `false` it stays on Ceph only.
+- Revert uses the copy on Ceph. Delete removes both copies.
+- When the disk or the instance is deleted, the copy on Ceph goes with the image. A copy on secondary storage remains as a snapshot that can be downloaded and deleted, not reverted to.
 
-Lab: Ceph 20.2.5, two Proxmox clusters on the same pools, a throwaway guest (`rbd-snap-probe.txt`, `rbd-snap-probe2.txt`). Production: read-only.
+## How it is wired
 
-| Question | Finding |
+No new snapshot strategy. The stock strategies (`DefaultSnapshotStrategy` for take, delete and backup; `CephSnapshotStrategy` for revert) select External pools because they are recorded as RBD pools with RAW volumes. What is new:
+
+| Piece | What it does |
 |---|---|
-| Can a separate Ceph client snapshot a disk of a running guest | Yes. 0.2 s on the EC tier, 1.1 s on the replicated tier. The guest is not paused; the snapshot is crash-consistent |
-| Does Proxmox see such a snapshot | No. `qm listsnapshot` does not list it. Proxmox's own snapshot and snapshot delete leave it alone |
-| Roll back with the guest stopped | Works: the image is byte-identical to the snapshot afterwards and the guest boots. A stopped guest's image has no watcher (`rbd status`), a running one has; that is a second check before a rollback |
-| Proxmox grows a disk that has a snapshot | Allowed by Proxmox and Ceph. A later rollback shrinks the image back while Proxmox's configuration keeps the larger size |
-| Proxmox moves a disk that has a snapshot | The copy has no snapshots. The source image is deleted with its snapshots, protected or not |
-| Proxmox deletes a disk, or destroys the guest | The image is deleted with its snapshots, protected or not |
-| Space used by a snapshot | `rbd du` answers in 0.1 s (the images have fast-diff) |
-| What the Ceph client can be limited to | Its pools, not less. There is no snapshot-only capability: a client that can snapshot and roll back can also write and delete every image in those pools. In production those pools also hold the KVM volumes |
-| Does stock CloudStack already have this path | Yes, for KVM on Ceph with `snapshot.backup.to.secondary=false`: `DefaultSnapshotStrategy` (take, delete) and `CephSnapshotStrategy` (revert) call the storage driver's `takeSnapshot`, `deleteAsync` and `revertSnapshot`. External pools are recorded as RBD pools and their volumes as RAW, so by their code both strategies select them (read, not run) |
-| Production: can the management server reach Ceph | Yes. The management server (Ubuntu 24.04) has an address on the Ceph public network and reaches the monitors on 3300 and 6789. It has no `rbd` command; its package is `ceph-common` 19.2.3 |
-| Production: will that `rbd` authenticate | Yes. Production Ceph (20.2.4) accepts both key types and prefers the classic one. The lab's Ceph accepts only the new type (`aes256k`), which the `rbd` of Ubuntu 26.04 (20.2.0) cannot read, so the lab management server cannot authenticate with its packaged `rbd`; Proxmox's 19.2.6 can |
+| `ExternalPrimaryDataStoreDriver` | `takeSnapshot`, `revertSnapshot`, and `deleteAsync` of a snapshot, each one extension action |
+| `ExternalSnapshotBackup` (a `DataMotionStrategy`) | the copy to secondary storage. A KVM host does this for KVM; here the management server mounts the NFS secondary storage (`NfsMountManager`, as stock does for VMware) and the extension writes the file with `qemu-img convert` |
+| `ExternalVolumeSnapshots` | parameters, the per-instance lock, which host and cluster to ask, the rule that holds a disk |
+| Extension actions | `snapshotdisk`, `revertdisksnapshot` (on an instance; under a lease when adopted), `deletedisksnapshot`, `backupdisksnapshot` (on the storage; run on the management server that was asked, not through a host's agent) |
+| Capability | `instancevolumesnapshotsupported`, an extension detail. Volumes report it; the UI offers Take Snapshot and Recurring Snapshots only with it |
+| Extension details | `ceph_client`, `ceph_keyring` (a file readable by `cloud`; the key is never in CloudStack), and optionally `rbd_command`, `qemu_img_command` |
 
-## How it would be wired
+The snapshot's name on Ceph is `cloudstack-<snapshot UUID>`. The pool, namespace and monitors come from the Proxmox storage definition. CloudStack records the snapshot as `<Proxmox volume>@<name>`, so it is always deleted from the image it was taken on.
 
-1. **No new strategy.** The stock strategies stay as they are. The External storage driver implements the three calls, each one extension action: `snapshotdisk`, `deletedisksnapshot`, `revertdisksnapshot`.
-2. **The extension runs `rbd`** (`snap create`, `snap rm`, `snap rollback`) on the management server as its own Ceph client. The pool, data pool and monitors are the ones the pool registration already recorded. New extension details name the client and its keyring file; the key itself is never in CloudStack.
-3. **Core changes, small:**
-   - a snapshot of a volume on an External pool is never backed up to secondary storage, whatever `snapshot.backup.to.secondary` says (allocation, take, and where the snapshot's store is looked up);
-   - the two stock refusals "Snapshot operations are not allowed for External hypervisor type" become a check of a new capability, `instancevolumesnapshotsupported`, and of the pool being RBD;
-   - expunge of an External instance removes the snapshot records of its disks (see decision 1).
-4. **The snapshot's name on Ceph** is `cloudstack-<snapshot UUID>`. It cannot be a CloudStack instance snapshot's name, and Proxmox would only produce it if someone typed it.
-5. **Adopted instances** run the three actions under a lease, with the same known/unknown rule as every other change. All three take the per-instance lock that disk changes and refresh take.
+Stock code changed: the three refusals "Snapshot operations are not allowed for External hypervisor type" now ask whether the volume can be snapshotted; a volume or a Template from such a snapshot is refused (see Not included); the volume and snapshot responses each gained one field for the UI.
 
 ## Rules
 
-- **Take:** instance running or stopped. Crash-consistent when running, as stock KVM on Ceph.
-- **Revert:** stock rules (instance stopped, no instance snapshots). The extension also requires the guest stopped in Proxmox and no watcher on the image. A rollback rewrites the whole image, so its time grows with the disk; it was not measured on a large disk. Past the extension's limit (6900 s) the outcome is unknown and the instance stays fenced until checked.
-- **A disk with snapshots is frozen:** no grow, move, tier change or delete until its snapshots are deleted. This is the rule already agreed for instance snapshots, for the reasons in the findings.
-- **Delete:** a snapshot already gone on Ceph can still be deleted in CloudStack.
-- **Counts:** as stock on Ceph (read from the code). Each snapshot counts once against the account's snapshot limit and, at the disk's full size, against its primary storage limit. A 500 GiB disk with seven snapshots counts 4 TiB.
-- **Changes made in Proxmox** (a disk moved or deleted there) destroy the snapshots without CloudStack knowing. The records remain; revert then fails and delete succeeds.
+- **Take:** refuses a disk whose slot no longer holds the recorded volume. Adopted instances: under a lease.
+- **Revert:** stock rules (instance stopped, no Instance Snapshots). The extension also requires the guest stopped in Proxmox, no Proxmox snapshots, nothing holding the image open, and the image the size it was when snapshotted. Ceph rewrites the image object by object, so the time grows with the disk; the action is given 6900 s, and past that the outcome is unknown and an adopted instance stays fenced until checked.
+- **A disk with a snapshot on Ceph is not grown or moved** (including a tier change). A grown disk could not be reverted; a move leaves the snapshots with the old image, which Proxmox deletes. Delete the snapshots first.
+- **Deleting the disk or the instance is allowed**, as stock.
+- **Schedules and retention:** stock.
+- **Counts:** stock. One snapshot each. With the copy to secondary storage, the size of the qcow2 file counts against secondary storage. Without it, the disk's full size counts against primary storage.
+- **Changes made in Proxmox** (a disk moved or deleted there) destroy the copies on Ceph without CloudStack knowing. Revert then fails; delete succeeds.
+
+## Tested in the lab
+
+Ceph 20.2.5, two Proxmox clusters on the same pools, EC and replicated tiers, NFS secondary storage. Results in the operator notes.
+
+| Case | Result |
+|---|---|
+| Take on a running ordinary guest and a running adopted guest | Ceph snapshot and qcow2 copy made; QEMU process unchanged; no lease left |
+| The copy | raw contents identical (SHA-256) to the Ceph snapshot; a download URL is issued by the stock secondary storage VM |
+| Revert while running | refused by stock |
+| Revert after the disk was changed from outside, guest stopped | image identical to the snapshot again; guest starts |
+| Guest started in Proxmox while CloudStack records it stopped, then revert | refused before any write; no lease left |
+| Keyring that cannot be read | refused before any write; snapshot record in Error, deletable |
+| Same VMID in both clusters, same pool | the snapshot is on the right image only |
+| Grow, move with a snapshot | refused |
+| Volume or Template from a snapshot | refused |
+| Delete | both copies gone, counts back |
+| Hourly schedule, keep 1 | fired twice; the second removed the first from Ceph and secondary storage |
+| `asyncbackup=true` | works |
+| Data disk deleted with a snapshot on it | image and Ceph snapshot gone; the secondary copy remains, can be deleted |
+| Adopted instance expunged with a snapshot on its root disk | guest, images and Ceph snapshots gone; first cluster's guest with the same VMID untouched; secondary copies remain, deleted afterwards, counts back |
+| `snapshot.backup.to.secondary=false` | Ceph only; take, delete; a disk deleted with such a snapshot takes the record and its counts with it |
+
+796 Java tests, 90 extension tests, 9 getconfig tests, 35 volume UI checks.
+
+Not tested: a lost answer during take or rollback on a live system (offline tests only); disks of real size (time of a rollback and of a copy); Windows; more than one management server; the UI in a browser; archive, and copy to another zone.
+
+## Stock behaviour seen, left as it is
+
+- `asyncbackup=true` leaves the account's secondary storage count high by about the disk's size.
+- With `snapshot.backup.to.secondary=false`, deleting a snapshot does not return its primary storage count.
+- A failed take reports only "an internal error"; the reason is in the management log.
+- `snapshot.backup.to.secondary` takes effect after a management server restart.
 
 ## Not included
 
-Volume from a snapshot, template from a snapshot, download, copy to another zone or pool, archive to secondary storage, freezing the guest's filesystems for the snapshot. Volume from a snapshot belongs with detach and re-attach, which is deferred.
+Volume from a snapshot and Template from a snapshot (the first belongs with detach and re-attach, which is deferred), freezing the guest's filesystems for the snapshot, secondary storage that is not NFS.
 
 ## Production prerequisites
 
-- `ceph-common` on the management server.
-- A Ceph client for the extension with `profile rbd` on the six pools of the three tiers, classic key type, keyring readable only by `cloud`.
-- The three extension details and the capability.
-
-## Lab prerequisite
-
-An `rbd` on the lab management server that can read the lab's key type: a newer `ceph-common`, or the lab Ceph changed to accept the classic type as production does.
-
-## Decisions needed
-
-1. **Expunging an instance deletes the snapshots of its disks.** They are part of the images Proxmox destroys, so they cannot outlive the instance (stock volume snapshots, kept on secondary storage, do). Proposed: expunge removes their records and counts with the instance. The alternative is to refuse expunge until they are deleted.
-2. **Snapshot schedules.** Proposed: allowed. They use the same path, and stock retention deletes the oldest.
-3. **The Ceph key on the management server can write and delete every image in the tier pools**, KVM volumes included. This follows from running `rbd` from the extension, which is already decided; it is listed so that it is accepted knowingly.
-
-## Build steps
-
-1. Extension: three actions and their tests (fake `rbd`), `rbd` invocation without the key on the command line or in output.
-2. Driver, capability, core changes, unit tests.
-3. UI: snapshot actions for volumes of External instances with the capability; hide what is not included.
-4. Lab: both tiers, both clusters, running and stopped, adopted and ordinary, duplicate VMIDs, schedule with retention, frozen-disk refusals, expunge, lost answer on a revert, counts.
+- On the management server: `rbd` and `qemu-img` with RBD support, matching the cluster (Ceph 20.2.5: `ceph-common` from Ceph's noble repository, `qemu-utils` and `qemu-block-extra`). The lab runs exactly these from a noble tree, because its own Ubuntu release has no 20.2.5 packages.
+- A Ceph client for the extension with `profile rbd` on the pools of the three tiers; keyring readable only by `cloud`. This client can write and delete every image in those pools, KVM volumes included (accepted).
+- The NFS secondary storage exported to the management server.
+- The copy runs through the management server: its CPU and network carry every snapshot backup.
+- The capability and the Ceph details on the extension.

@@ -285,7 +285,7 @@ Source dependency inventory: the operator notes. It is source-only, not a live r
 
 ### Step 8: disks (decided 14 Nov 2026: model them in CloudStack)
 
-Design and as-built record: `EXTERNAL-STORAGE-DESIGN.md`. Built in the lab only, nothing on production: disks as volumes (phase 1), add, grow, delete and move through the volume API (phase 2), CD/DVD ISOs (`EXTERNAL-ISO-PLAN.md`), and whole-instance snapshots through CloudStack's Instance Snapshot API (phase 3, 15 Nov 2026). Per-disk snapshots on Ceph (phase 4) are still to be investigated. Moving a disk between instances is deferred.
+Design and as-built record: `EXTERNAL-STORAGE-DESIGN.md`. Built in the lab only, nothing on production: disks as volumes (phase 1), add, grow, delete and move through the volume API (phase 2), CD/DVD ISOs (`EXTERNAL-ISO-PLAN.md`), and whole-instance snapshots through CloudStack's Instance Snapshot API (phase 3, 15 Nov 2026). Per-disk snapshots on Ceph (phase 4, 15 Nov 2026) are stock volume snapshots, copied to secondary storage as stock: `EXTERNAL-VOLUME-SNAPSHOT-PLAN.md`. Moving a disk between instances is deferred.
 
 ### Step 9: upstream
 

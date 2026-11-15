@@ -189,6 +189,10 @@ public class VolumeResponse extends BaseResponseWithTagInformation implements Co
     @Param(description = "Hypervisor the volume belongs to")
     private String hypervisor;
 
+    @SerializedName(org.apache.cloudstack.extension.ExtensionHelper.INSTANCE_VOLUME_SNAPSHOT_SUPPORTED)
+    @Param(description = "For a disk of an External Instance, true if its extension can take Snapshots of it.")
+    private Boolean instanceVolumeSnapshotSupported;
+
     @SerializedName(ApiConstants.DISK_OFFERING_ID)
     @Param(description = "ID of the disk offering")
     private String diskOfferingId;
@@ -504,6 +508,10 @@ public class VolumeResponse extends BaseResponseWithTagInformation implements Co
 
     public void setHypervisor(String hypervisor) {
         this.hypervisor = hypervisor;
+    }
+
+    public void setInstanceVolumeSnapshotSupported(Boolean supported) {
+        this.instanceVolumeSnapshotSupported = supported;
     }
 
     public void setDiskOfferingId(String diskOfferingId) {

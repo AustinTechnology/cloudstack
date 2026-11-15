@@ -32,11 +32,14 @@ import org.apache.cloudstack.engine.subsystem.api.storage.TemplateInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.storage.command.CommandResult;
+import org.apache.cloudstack.storage.command.CreateObjectAnswer;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolVO;
+import org.apache.cloudstack.storage.to.SnapshotObjectTO;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.cloud.agent.api.to.DataObjectType;
 import com.cloud.agent.api.to.DataStoreTO;
 import com.cloud.agent.api.to.DataTO;
 import com.cloud.host.Host;
@@ -47,9 +50,10 @@ import com.cloud.storage.Volume;
 import com.cloud.utils.Pair;
 
 /**
- * The disks on External storage are created, changed and destroyed at the provider. This driver changes nothing
- * there: deleting a volume removes CloudStack's record only, and the operations that would have to write to the
- * provider are refused.
+ * The disks on External storage are created, changed and destroyed at the provider. This driver changes no disk
+ * there: deleting a volume removes CloudStack's record only, and the operations that would have to write a disk to
+ * the provider are refused. Snapshots of one disk are the exception: where the extension can take them, on Ceph,
+ * the stock snapshot strategies take, revert to and delete them through this driver.
  */
 public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     static final String UNSUPPORTED = "This operation is not supported on External storage";
@@ -57,6 +61,11 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Inject ExternalStorageInventory inventory;
     @Inject PrimaryDataStoreDao poolDao;
+    @Inject ExternalVolumeSnapshots volumeSnapshots;
+
+    private static String reason(RuntimeException e) {
+        return e.getMessage() == null ? e.toString() : e.getMessage();
+    }
 
     @Override
     public Map<String, String> getCapabilities() {
@@ -86,7 +95,22 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      */
     @Override
     public void deleteAsync(DataStore store, DataObject data, AsyncCompletionCallback<CommandResult> callback) {
-        callback.complete(new CommandResult());
+        CommandResult result = new CommandResult();
+        if (data.getType() == DataObjectType.SNAPSHOT) {
+            try {
+                volumeSnapshots.delete(poolDao.findById(store.getId()), data.getUuid(), ((SnapshotInfo)data).getPath());
+            } catch (RuntimeException e) {
+                logger.warn("Unable to delete snapshot {} from {}: {}", data.getUuid(), store.getName(), reason(e));
+                result.setResult(reason(e));
+            }
+        } else if (data.getType() == DataObjectType.VOLUME) {
+            try {
+                volumeSnapshots.gone(data.getId());
+            } catch (RuntimeException e) {
+                logger.warn("Unable to remove the records of the snapshots of volume {}: {}", data.getUuid(), reason(e));
+            }
+        }
+        callback.complete(result);
     }
 
     @Override
@@ -147,17 +171,37 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return 0;
     }
 
+    /** Takes the snapshot where the disk is. It is recorded by where it is: the disk's volume there and its name on it. */
     @Override
     public void takeSnapshot(SnapshotInfo snapshot, AsyncCompletionCallback<CreateCmdResult> callback) {
-        CreateCmdResult result = new CreateCmdResult(null, null);
-        result.setResult(UNSUPPORTED);
+        CreateCmdResult result;
+        try {
+            Pair<String, Long> taken = volumeSnapshots.take(snapshot.getVolumeId(), snapshot.getUuid());
+            SnapshotObjectTO made = new SnapshotObjectTO();
+            made.setPath(taken.first());
+            made.setPhysicalSize(taken.second());
+            result = new CreateCmdResult(taken.first(), new CreateObjectAnswer(made));
+        } catch (RuntimeException e) {
+            logger.warn("Unable to take snapshot {}: {}", snapshot.getUuid(), reason(e));
+            result = new CreateCmdResult(null, new CreateObjectAnswer(reason(e)));
+            result.setResult(reason(e));
+        }
         callback.complete(result);
     }
 
+    /** Returns the disk to the snapshot that is with it. A copy on secondary storage alone cannot be reverted to. */
     @Override
     public void revertSnapshot(SnapshotInfo snapshotOnImageStore, SnapshotInfo snapshotOnPrimaryStore, AsyncCompletionCallback<CommandResult> callback) {
         CommandResult result = new CommandResult();
-        result.setResult(UNSUPPORTED);
+        try {
+            if (snapshotOnPrimaryStore == null) {
+                throw new IllegalStateException("The snapshot is no longer with the disk; it cannot be reverted to");
+            }
+            volumeSnapshots.revert(snapshotOnPrimaryStore.getVolumeId(), snapshotOnPrimaryStore.getUuid(), snapshotOnPrimaryStore.getPath());
+        } catch (RuntimeException e) {
+            logger.warn("Unable to revert to snapshot {}: {}", snapshotOnImageStore.getUuid(), reason(e));
+            result.setResult(reason(e));
+        }
         callback.complete(result);
     }
 

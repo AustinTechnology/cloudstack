@@ -91,7 +91,7 @@ Each phase is usable alone.
 1. **See.** Pools registered; the refresh, the periodic worker and `adoptExternalInstance` import and update volumes. Disks show in the UI and API with size and storage. No Proxmox writes. A VM deployed through CloudStack gets its volume records at its next refresh. **Built and tested in the lab; see below.**
 2. **Change attached disks.** Add a data disk, grow a disk, delete a data disk, move a disk between storages. **Built and tested in the lab; see below.**
 3. **Whole-VM snapshots.** CloudStack VM snapshots mapped to Proxmox snapshots, replacing the custom actions. Built; see "Phase 3 as built".
-4. **Per-disk snapshots on Ceph.** To be investigated before it is designed; see the section below.
+4. **Per-disk snapshots on Ceph.** Built in the lab, 15 Nov 2026, as stock volume snapshots with the stock copy to secondary storage: `EXTERNAL-VOLUME-SNAPSHOT-PLAN.md`.
 
 Deferred, not dropped: detaching a data disk and attaching it to another VM. Until then a data disk lives and dies with its VM. A Proxmox image always belongs to a guest, so this will need a decision on where a detached disk lives. Nothing in phases 1 and 2 may tie a volume's identity to its VM.
 
@@ -119,9 +119,9 @@ Nine data disks are on storages with no tier: one on `ssd-replicated`, one on `m
 
 Production has none of these offerings yet: its disk offerings are three fixed sizes, one untagged custom offering and one tagged `SAS`. The KVM pools already carry one tag per Ceph pool (`ceph-ssd-ec` and so on), which is the same tiering.
 
-### Per-disk snapshots on Ceph (to investigate)
+### Per-disk snapshots on Ceph (built; see `EXTERNAL-VOLUME-SNAPSHOT-PLAN.md`)
 
-Investigated 15 Nov 2026: findings and the proposed design are in `EXTERNAL-VOLUME-SNAPSHOT-PLAN.md`. The notes below are the earlier starting point.
+Built and tested in the lab 15 Nov 2026: the as-built record is `EXTERNAL-VOLUME-SNAPSHOT-PLAN.md`. The notes below are the earlier starting point and are superseded where they differ; in particular the copy to secondary storage is kept, as stock.
 
 Proxmox has no per-disk snapshot, but 210 of the 217 disks are RBD images, and Ceph can snapshot one image.
 

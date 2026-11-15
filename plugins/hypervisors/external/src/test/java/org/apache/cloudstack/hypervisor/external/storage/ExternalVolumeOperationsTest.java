@@ -113,6 +113,7 @@ public class ExternalVolumeOperationsTest {
         operations.volumeSync = mock(ExternalVolumeSync.class);
         operations.instanceLock = mock(ExternalInstanceLock.class);
         operations.vmSnapshotDao = mock(com.cloud.vm.snapshot.dao.VMSnapshotDao.class);
+        operations.volumeSnapshots = mock(ExternalVolumeSnapshots.class);
         when(operations.instanceLock.hold(eq(10L), anyInt(), any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(2)).get());
         doReturn(1024L).when(operations).maxCustomSizeGib();
         vm = mock(VMInstanceVO.class);

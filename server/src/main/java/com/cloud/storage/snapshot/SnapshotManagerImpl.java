@@ -116,6 +116,7 @@ import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.exception.StorageUnavailableException;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.ExternalInstanceDiskSnapshots;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.org.Grouping;
 import com.cloud.projects.Project.ListProjectResourcesCriteria;
@@ -235,6 +236,8 @@ public class SnapshotManagerImpl extends MutualExclusiveIdsManagerBase implement
     ConfigurationDao _configDao;
     @Inject
     VMSnapshotDao _vmSnapshotDao;
+    @Inject
+    ExternalInstanceDiskSnapshots externalInstanceDiskSnapshots;
     @Inject
     DataStoreManager dataStoreMgr;
     @Inject
@@ -1187,8 +1190,8 @@ public class SnapshotManagerImpl extends MutualExclusiveIdsManagerBase implement
         _accountMgr.checkAccess(caller, null, true, volume);
 
         VMInstanceVO attachedTo = volume.getInstanceId() == null ? null : _vmDao.findById(volume.getInstanceId());
-        if (attachedTo != null && HypervisorType.External.equals(attachedTo.getHypervisorType())) {
-            throw new InvalidParameterValueException("Snapshot operations are not allowed for External hypervisor type");
+        if (attachedTo != null && HypervisorType.External.equals(attachedTo.getHypervisorType()) && externalInstanceDiskSnapshots.whyNot(volume.getId()) != null) {
+            throw new InvalidParameterValueException(externalInstanceDiskSnapshots.whyNot(volume.getId()));
         }
 
         // If display is false we don't actually schedule snapshots.

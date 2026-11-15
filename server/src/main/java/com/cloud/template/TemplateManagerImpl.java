@@ -2243,6 +2243,9 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
              */
 
             hyperType = snapshot.getHypervisorType();
+            if (hyperType == HypervisorType.External) {
+                throw new InvalidParameterValueException("A Template cannot be created from a snapshot of a disk of an External hypervisor instance");
+            }
         }
 
         if (zoneId != null) {

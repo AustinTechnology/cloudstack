@@ -142,4 +142,14 @@ public interface ExtensionsManager extends Manager {
     Answer changeInstanceIso(VirtualMachine vm, String action, java.util.Map<String, Object> parameters);
 
     java.util.List<String> ISO_ACTIONS = java.util.Arrays.asList("attachiso", "detachiso");
+
+    /**
+     * Asks the orchestrator extension of an External instance to snapshot one of its disks where the disk is, or to
+     * return the disk to such a snapshot. The action is one of {@link #DISK_SNAPSHOT_ACTIONS}; the parameters are
+     * "device", "volume" and "snapshot", and what the extension needs to reach the storage. The extension must declare
+     * {@link org.apache.cloudstack.extension.ExtensionHelper#INSTANCE_VOLUME_SNAPSHOT_SUPPORTED}.
+     */
+    Answer changeInstanceDiskSnapshot(VirtualMachine vm, String action, java.util.Map<String, Object> parameters);
+
+    java.util.List<String> DISK_SNAPSHOT_ACTIONS = java.util.Arrays.asList("snapshotdisk", "revertdisksnapshot");
 }

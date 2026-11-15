@@ -34,4 +34,5 @@
     <bean id="ExternalVolumeOperations" class="org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeOperations" />
     <bean id="ExternalInstanceLock" class="org.apache.cloudstack.hypervisor.external.storage.ExternalInstanceLock" />
     <bean id="ExternalIsoLibrary" class="org.apache.cloudstack.hypervisor.external.storage.ExternalIsoLibrary" />
+    <bean id="ExternalVolumeSnapshots" class="org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSnapshots" />
 </beans>

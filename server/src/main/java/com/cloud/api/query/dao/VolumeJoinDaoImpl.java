@@ -42,6 +42,7 @@ import org.springframework.stereotype.Component;
 import com.cloud.api.ApiDBUtils;
 import com.cloud.api.ApiResponseHelper;
 import com.cloud.api.query.vo.VolumeJoinVO;
+import com.cloud.hypervisor.ExternalInstanceDiskSnapshots;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.offering.DiskOffering;
 import com.cloud.offering.ServiceOffering;
@@ -67,6 +68,8 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
     private VmDiskStatisticsDao vmDiskStatsDao;
     @Inject
     private PrimaryDataStoreDao primaryDataStoreDao;
+    @Inject
+    private ExternalInstanceDiskSnapshots externalInstanceDiskSnapshots;
     @Inject
     private KMSWrappedKeyDao kmsWrappedKeyDao;
     @Inject
@@ -262,6 +265,7 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
         StoragePoolVO externalPool = primaryDataStoreDao.findById(volume.getPoolId());
         if (externalPool != null && externalPool.getHypervisor() == Hypervisor.HypervisorType.External) {
             volResponse.setHypervisor(Hypervisor.HypervisorType.External.getHypervisorDisplayName());
+            volResponse.setInstanceVolumeSnapshotSupported(externalInstanceDiskSnapshots.whyNot(volume.getId()) == null);
         }
 
         volResponse.setAttached(volume.getAttached());

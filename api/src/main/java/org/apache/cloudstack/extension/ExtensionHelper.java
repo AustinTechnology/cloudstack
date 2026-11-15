@@ -71,6 +71,11 @@ public interface ExtensionHelper {
     /** Whether this enabled orchestrator can take, revert to and delete snapshots of its whole instances. */
     boolean isInstanceSnapshotSupported(long extensionId);
 
+    String INSTANCE_VOLUME_SNAPSHOT_SUPPORTED = "instancevolumesnapshotsupported";
+
+    /** Whether this enabled orchestrator can take, revert to, delete and copy out snapshots of one disk of its instances. */
+    boolean isInstanceVolumeSnapshotSupported(long extensionId);
+
     /**
      * Network Guru of Network Extension
      */

@@ -29,6 +29,7 @@ import javax.inject.Inject;
 import com.cloud.api.ApiDBUtils;
 import com.cloud.api.ApiResponseHelper;
 import com.cloud.api.query.vo.SnapshotJoinVO;
+import com.cloud.hypervisor.Hypervisor;
 import com.cloud.storage.GuestOS;
 import com.cloud.storage.Snapshot;
 import com.cloud.storage.VMTemplateStorageResourceAssoc;
@@ -179,6 +180,9 @@ public class SnapshotJoinDaoImpl extends GenericDaoBaseWithTagInformation<Snapsh
         }
         snapshotResponse.setIntervalType(intervalType);
         snapshotResponse.setState(snapshot.getStatus());
+        if (snapshot.getHypervisorType() == Hypervisor.HypervisorType.External) {
+            snapshotResponse.setHypervisor(snapshot.getHypervisorType().getHypervisorDisplayName());
+        }
         snapshotResponse.setLocationType(snapshot.getLocationType() != null ? snapshot.getLocationType().name() : null);
         if (!isShowUnique) {
             snapshotResponse.setDatastoreState(snapshot.getStoreState() != null ? snapshot.getStoreState().name() : null);

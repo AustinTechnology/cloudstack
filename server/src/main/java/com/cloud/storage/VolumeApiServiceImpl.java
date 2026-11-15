@@ -162,6 +162,7 @@ import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.Status;
 import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.ExternalInstanceDiskSnapshots;
 import com.cloud.hypervisor.ExternalInstanceDisks;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.hypervisor.HypervisorCapabilitiesVO;
@@ -305,6 +306,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     private VMInstanceDao _vmInstanceDao;
     @Inject
     private ExternalInstanceDisks externalInstanceDisks;
+    @Inject
+    private ExternalInstanceDiskSnapshots externalInstanceDiskSnapshots;
     @Inject
     private PrimaryDataStoreDao _storagePoolDao;
     @Inject
@@ -921,6 +924,9 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
             if (snapshotCheck.getState() != Snapshot.State.BackedUp) {
                 throw new InvalidParameterValueException(String.format("Snapshot %s is not in %s state yet and can't be used for volume creation", snapshotCheck, Snapshot.State.BackedUp));
+            }
+            if (HypervisorType.External.equals(snapshotCheck.getHypervisorType())) {
+                throw new InvalidParameterValueException("A volume cannot be created from a snapshot of a disk of an External hypervisor instance");
             }
 
             SnapshotDataStoreVO snapshotStore = _snapshotDataStoreDao.findOneBySnapshotAndDatastoreRole(snapshotId, DataStoreRole.Primary);
@@ -4265,8 +4271,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         if (volume == null) {
             throw new InvalidParameterValueException("Creating snapshot failed due to volume:" + volumeId + " doesn't exist");
         }
-        if (HypervisorType.External.equals(volume.getHypervisorType())) {
-            throw new InvalidParameterValueException("Snapshot operations are not allowed for External hypervisor type");
+        if (HypervisorType.External.equals(volume.getHypervisorType()) && externalInstanceDiskSnapshots.whyNot(volume.getId()) != null) {
+            throw new InvalidParameterValueException(externalInstanceDiskSnapshots.whyNot(volume.getId()));
         }
         if (policyId != null && policyId > 0) {
             if (CollectionUtils.isNotEmpty(zoneIds)) {
@@ -4441,8 +4447,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             throw new InvalidParameterValueException(String.format("Volume: %s is not in %s state but %s. Cannot take snapshot.", volume.getVolume(), Volume.State.Ready, volume.getState()));
         }
 
-        if (HypervisorType.External.equals(volume.getHypervisorType())) {
-            throw new InvalidParameterValueException("Snapshot operations are not allowed for External hypervisor type");
+        if (HypervisorType.External.equals(volume.getHypervisorType()) && externalInstanceDiskSnapshots.whyNot(volume.getId()) != null) {
+            throw new InvalidParameterValueException(externalInstanceDiskSnapshots.whyNot(volume.getId()));
         }
 
         if (ImageFormat.DIR.equals(volume.getFormat())) {

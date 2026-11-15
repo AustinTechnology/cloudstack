@@ -75,6 +75,7 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
     @Inject ExternalVolumeSync volumeSync;
     @Inject ExternalInstanceLock instanceLock;
     @Inject VMSnapshotDao vmSnapshotDao;
+    @Inject ExternalVolumeSnapshots volumeSnapshots;
 
     /** How long a disk change waits for a refresh or another disk change of the instance to finish. */
     private static final int LOCK_WAIT_SECONDS = 30;
@@ -199,6 +200,9 @@ public class ExternalVolumeOperations implements ExternalInstanceDisks {
     private Volume withoutSnapshots(Volume given) {
         if (!vmSnapshotDao.findByVm(instanceOf(given)).isEmpty()) {
             throw reject("The disks of an instance with Instance Snapshots cannot be changed; delete its Instance Snapshots first");
+        }
+        if (volumeSnapshots.held(given)) {
+            throw reject("A disk with snapshots cannot be grown or moved; delete its snapshots first");
         }
         return given;
     }

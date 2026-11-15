@@ -169,7 +169,7 @@ export default {
           label: 'label.action.take.snapshot',
           dataView: true,
           show: (record, store) => {
-            return record.state === 'Ready' && record.hypervisor !== 'External' &&
+            return record.state === 'Ready' && (record.hypervisor !== 'External' || record.instancevolumesnapshotsupported === true) &&
               (record.hypervisor !== 'KVM' ||
                ['Stopped', 'Destroyed'].includes(record.vmstate) ||
                store.features.kvmsnapshotenabled)
@@ -184,7 +184,7 @@ export default {
           label: 'label.action.recurring.snapshot',
           dataView: true,
           show: (record, store) => {
-            return record.state === 'Ready' && record.hypervisor !== 'External' &&
+            return record.state === 'Ready' && (record.hypervisor !== 'External' || record.instancevolumesnapshotsupported === true) &&
               (record.hypervisor !== 'KVM' ||
                (['Stopped', 'Destroyed'].includes(record.vmstate)) ||
                (store.features.kvmsnapshotenabled))
@@ -388,7 +388,7 @@ export default {
           icon: 'picture-outlined',
           label: 'label.create.template',
           dataView: true,
-          show: (record) => { return record.state === 'BackedUp' },
+          show: (record) => { return record.state === 'BackedUp' && record.hypervisor !== 'External' },
           popup: true,
           component: shallowRef(defineAsyncComponent(() => import('@/views/storage/CreateTemplate.vue')))
         },
@@ -397,7 +397,7 @@ export default {
           icon: 'hdd-outlined',
           label: 'label.action.create.volume',
           dataView: true,
-          show: (record) => { return record.state === 'BackedUp' },
+          show: (record) => { return record.state === 'BackedUp' && record.hypervisor !== 'External' },
           popup: true,
           component: shallowRef(defineAsyncComponent(() => import('@/views/storage/CreateVolume.vue')))
         },

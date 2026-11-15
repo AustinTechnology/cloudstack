@@ -213,6 +213,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             case "start": case "stop": case "reboot": case "setha": case "scale": case "plugnic": case "unplugnic": return action;
             case "adddisk": case "resizedisk": case "deletedisk": case "movedisk": return action;
             case "attachiso": case "detachiso": return action;
+            case "snapshotdisk": case "revertdisksnapshot": return action;
             case "delete": return action;
             case "createsnapshot": return "create_snapshot";
             case "revertsnapshot": return "restore_snapshot";
