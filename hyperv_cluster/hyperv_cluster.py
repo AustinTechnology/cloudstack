@@ -313,7 +313,7 @@ $g = GroupOf $v
 if ($A.enabled) {
   if (-not $g) { Add-ClusterVirtualMachineRole -VMId $v.Id | Out-Null }
 } elseif ($g) {
-  if ([string]$v.State -ne 'Off') { Unchanged 'Stop the instance to take it out of the failover cluster' }
+  # Removing the role leaves the VM as it is, running or not.
   Remove-ClusterGroup -InputObject $g -RemoveResources -Force
 }
 $v = Get-VM -Id $v.Id
@@ -538,6 +538,25 @@ class WinRMTransport:
             return json.loads(text.splitlines()[-1])
         except (ValueError, IndexError):
             raise Fail("Unreadable answer from node %s (exit %s)" % (node, code), known=script in READ_ONLY_SCRIPTS)
+
+
+def console_request(path, request, timeout):
+    """One request to the console helper over its Unix socket."""
+    import socket
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout)
+        conn.connect(path)
+        conn.sendall((json.dumps(request) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    try:
+        return json.loads(data.decode())
+    except ValueError:
+        return {"status": "error", "error": "unreadable answer"}
 
 
 def as_list(value):
@@ -1063,7 +1082,7 @@ class Extension:
             self.call(vm["node"], "cd", self.vm_args(vm, op="sync", wanted=[c["volume"] for c in cds],
                                                      bootcd=bool(cds and cds[0]["volume"] and cds[0].get("bootable"))))
         ha = str(self.to.get("enableHA", "")).lower()
-        if ha in ("true", "false") and (ha == "true") != bool(vm.get("clustered")) and (ha == "true" or vm["state"] == "Off"):
+        if ha in ("true", "false") and (ha == "true") != bool(vm.get("clustered")):
             self.call(vm["node"], "setha", self.vm_args(vm, enabled=ha == "true"))
         desc = self.call(vm["node"], "power", self.vm_args(vm, op="start", seconds=self.remaining()))
         if desc["state"] != "Running":
@@ -1148,7 +1167,24 @@ class Extension:
         return {"status": "success", "power_state": power}
 
     def do_getconsole(self):
-        raise Fail("Hyper-V offers no VNC console; use RDP to the guest or VMConnect on the cluster")
+        """The VM's console as VNC, through the console helper (VMConnect RDP on the node, served as VNC)."""
+        vm = self.find()
+        if vm["state"] != "Running":
+            raise Fail("The instance is not running")
+        address = self.settings["addresses"].get(self.node_address_key(vm["node"])) or vm["node"]
+        address = re.sub(r"^https?://", "", address).split("/")[0].rsplit(":", 1)[0] if "://" in address else address
+        request = {"node": address, "vmid": vm["guid"], "username": self.settings["username"],
+                   "password": self.settings["password"]}
+        path = self.setting("console_helper_socket", "/run/hyperv-console/helper.sock")
+        try:
+            answer = console_request(path, request, timeout=min(30, self.remaining()))
+        except OSError as e:
+            raise Fail("The Hyper-V console helper is not available (%s)" % type(e).__name__)
+        if answer.get("status") != "success" or not isinstance(answer.get("console"), dict):
+            raise Fail("The Hyper-V console helper could not open the console: %s" % answer.get("error", "no answer"))
+        c = answer["console"]
+        return {"status": "success", "console": {"host": c["host"], "port": int(c["port"]), "password": c["password"],
+                                                 "passwordonetimeuseonly": True, "protocol": "vnc"}}
 
     def do_discover(self):
         groups = self.cluster()["groups"]

@@ -175,8 +175,6 @@ class FakeCluster:
     def s_setha(self, node, args):
         vm = self.the_vm(node, args)
         self.settled(vm)
-        if not args["enabled"] and vm["clustered"] and vm["state"] != "Off":
-            raise Unchanged("Stop the instance to take it out of the failover cluster")
         vm["clustered"] = args["enabled"]
         return {"clustered": vm["clustered"], "state": vm["state"]}
 
@@ -654,19 +652,40 @@ class CreateAndLifecycle(Base):
         rc, out = self.run_action("reboot", payload("i-2-5-VM", vmid=vmid))
         self.assertEqual(rc, 90)
 
-    def test_getconsole_unsupported(self):
+    def test_getconsole_through_the_helper(self):
         vm, vmid = self.ordinary("i-2-5-VM")
+        seen = {}
+
+        def helper(path, request, timeout):
+            seen.update(request)
+            return {"status": "success", "console": {"host": "10.0.0.5", "port": 5901, "password": "Ab3dE6gH", "session": "x"}}
+        hv.console_request, saved = helper, hv.console_request
+        try:
+            rc, out = self.run_action("getconsole", payload("i-2-5-VM", vmid=vmid))
+        finally:
+            hv.console_request = saved
+        self.assertEqual(out, {"status": "success", "console": {"host": "10.0.0.5", "port": 5901, "password": "Ab3dE6gH",
+                                                                "passwordonetimeuseonly": True, "protocol": "vnc"}})
+        self.assertEqual((seen["node"], seen["vmid"]), ("hv01.lab.test", vm["guid"]))
+
+    def test_getconsole_refusals(self):
+        vm, vmid = self.ordinary("i-2-5-VM", state="Off")
         rc, out = self.run_action("getconsole", payload("i-2-5-VM", vmid=vmid))
         self.assertEqual(rc, 90)
-        self.assertIn("VNC", out["error"])
+        vm["state"] = "Running"
+        p = payload("i-2-5-VM", vmid=vmid)
+        p["externaldetails"]["extension"]["console_helper_socket"] = "/nonexistent/helper.sock"
+        rc, out = self.run_action("getconsole", p)
+        self.assertEqual(rc, 90)
+        self.assertIn("helper is not available", out["error"])
 
     def test_setha(self):
         vm, vmid = self.ordinary("i-2-5-VM")
         rc, out = self.run_action("setha", payload("i-2-5-VM", vmid=vmid, params={"enabled": True}))
         self.assertEqual(out, {"status": "success", "ha_enabled": True})
         rc, out = self.run_action("setha", payload("i-2-5-VM", vmid=vmid, params={"enabled": False}))
-        self.assertEqual(rc, 90)
-        self.assertIn("Stop the instance", out["error"])
+        self.assertEqual(out, {"status": "success", "ha_enabled": False})  # running: the role goes, the VM stays up
+        self.assertEqual(vm["state"], "Running")
 
     def test_scale(self):
         vm, vmid = self.ordinary("i-2-5-VM")
@@ -847,3 +866,39 @@ class Checkpoints(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Firmware(Base):
+    def create(self, firmware, **vmd):
+        rc, patch = self.run_action("prepare", payload("i-2-6-VM"))
+        vmid = int(patch["details"]["proxmox_vmid"])
+        p = payload("i-2-6-VM", vmid=vmid, cdroms=[{"drive": 0, "volume": "Volume1:iso/cloudstack-a.iso", "bootable": True}])
+        p["externaldetails"]["virtualmachine"].update(template_type="ISO", storage="Volume1", disk_size_gb="10", firmware=firmware, **vmd)
+        rc, out = self.run_action("create", p)
+        new = [c for c in self.c.calls if c[1] == "vm_new"]
+        return rc, out, (new[-1][2] if new else None), [c[2] for c in self.c.calls if c[1] == "vm_build"]
+
+    def test_bios_is_generation_1_and_uefi_generation_2(self):
+        rc, out, new, build = self.create("bios")
+        self.assertEqual((rc, new["generation"], build[0]["firmware"]), (0, 1, "bios"))
+        self.assertEqual(out["config"]["disks"][0]["device"], "ide0")
+        self.c = FakeCluster()
+        rc, out, new, build = self.create("uefi")
+        self.assertEqual((rc, new["generation"], build[0]["firmware"]), (0, 2, "uefi"))
+
+    def test_secure_boot_template_follows_the_guest_os(self):
+        rc, out, new, build = self.create("uefi-secure", iso_os_type="l26", )
+        self.assertEqual(rc, 90)  # no shared guardian
+        p_ext = {"hyperv_shared_guardian": "true"}
+        self.c = FakeCluster()
+        rc, patch = self.run_action("prepare", payload("i-2-6-VM"))
+        p = payload("i-2-6-VM", vmid=int(patch["details"]["proxmox_vmid"]))
+        p["externaldetails"]["extension"].update(p_ext)
+        p["externaldetails"]["virtualmachine"].update(template_type="ISO", storage="Volume1", disk_size_gb="10", firmware="uefi-secure", iso_os_type="l26")
+        rc, out = self.run_action("create", p)
+        build = [c[2] for c in self.c.calls if c[1] == "vm_build"][0]
+        self.assertEqual((rc, build["firmware"], build["sbtemplate"]), (0, "uefi-secure", "MicrosoftUEFICertificateAuthority"))
+
+    def test_unknown_firmware(self):
+        rc, out, new, build = self.create("efi")
+        self.assertEqual((rc, new), (90, None))

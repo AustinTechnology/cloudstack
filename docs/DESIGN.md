@@ -65,7 +65,7 @@ them to agree.
 | delete | `Remove-ClusterGroup -RemoveResources` (if clustered), `Remove-VM`, then the VM's own VHDX files and folder (exact paths read from the VM, never by name) |
 | status / statuses | `Get-VM` on every node, cluster group state |
 | discover | all nodes; `type` = `qemu` (compatibility, see gaps); `hastate` = `started`/`stopped` from the cluster group |
-| setha | `Add-ClusterVirtualMachineRole` (running or stopped); removal `Remove-ClusterGroup -RemoveResources` (keeps the VM) only while stopped, until it is shown live that removal leaves a running VM alone |
+| setha | `Add-ClusterVirtualMachineRole`; removal `Remove-ClusterGroup -RemoveResources`, which leaves the VM as it is, running or not (confirmed by Damian on production Hyper-V) |
 | scale | stopped only, `Set-VMProcessor`, `Set-VMMemory -StartupBytes` |
 | plugnic / unplugnic | `Add-VMNetworkAdapter -StaticMacAddress` + `Set-VMNetworkAdapterVlan -Access`; Gen 2 hot-add while running, Gen 1 stopped only |
 | adddisk / resizedisk / deletedisk / movedisk | `New-VHD` + `Add-VMHardDiskDrive` on SCSI (hot-add); `Resize-VHD` (running: SCSI only); `Remove-VMHardDiskDrive` then the exact file; `Move-VMStorage -VHDs` (live) |
@@ -73,8 +73,13 @@ them to agree.
 | attachiso / detachiso / fetchiso / findiso / removeiso | `Set-VMDvdDrive -Path`; download on a node with `Invoke-WebRequest` to `iso/<name>.part`, `Get-FileHash`, rename |
 | createsnapshot / revertsnapshot / deletesnapshot | `Checkpoint-VM`: with memory = Standard checkpoint of a running VM; disk only = Production checkpoint (running) or Standard (stopped). `Restore-VMCheckpoint`, `Remove-VMCheckpoint` |
 | getipaddress | KVP addresses of the adapter with that MAC |
-| getconsole | not supported (Hyper-V offers RDP/VMConnect, not VNC) |
+| getconsole | The console helper (`console_helper/`) on the management server: per request it starts Xvfb, `xfreerdp3 /vmconnect:<GUID>` to the owner node's port 2179 (the VMConnect channel, so it works without guest networking, from boot) and `x11vnc` with a one-time 8-character password, one client, 60 s to connect. The extension returns that host/port/password as a VNC console |
 | snapshotdisk etc. | not declared |
+
+Firmware is chosen at deployment (the stock BIOS/UEFI and Legacy/Secure fields, for an ISO deployment):
+`bios` → generation 1 (IDE root disk, IDE CD drives), `uefi` → generation 2 with Secure Boot off, `uefi-secure` →
+generation 2 with Secure Boot on. The generation is fixed at creation, as Hyper-V requires. A template's generation is
+fixed by its disk (MBR/BIOS or GPT/UEFI), so templates carry a `generation` detail instead.
 
 Firmware `uefi-secure`: Gen 2, Secure Boot with template `MicrosoftWindows` for Windows ISOs and
 `MicrosoftUEFICertificateAuthority` otherwise, and a vTPM with a local key protector. A local key protector only
@@ -100,7 +105,7 @@ Recorded as findings of the exercise, each worked around without a CloudStack ch
    representable for SCSI.
 5. NIC `device_id` is a number: Hyper-V adapters have none; the extension names its adapters `netN`.
 6. `expected_proxmox_name` in status bindings: honoured as the expected Hyper-V VM name.
-7. Console must be VNC or a URL: none.
+7. Console must be VNC or a URL: the console helper serves VMConnect (RDP) as VNC.
 8. Per-disk snapshots are Ceph-only: not offered.
 9. ISO OS codes are Proxmox names (`win11`, `l26`): used only to choose the Secure Boot template.
 10. The address observer sends integer VMIDs and expects Proxmox host details: not provided for Hyper-V (KVP
@@ -111,10 +116,14 @@ Recorded as findings of the exercise, each worked around without a CloudStack ch
 
 ## Test status
 
-- `test_hyperv_cluster.py`: 49 tests through the entry point against a simulated cluster (identity, native adoption
+- `test_hyperv_cluster.py`: 53 tests through the entry point against a simulated cluster (identity, native adoption
   context, exit 90/91, every action's result shape and refusals). The simulator was written with the extension, so it
   checks the Python logic, not Hyper-V's behaviour.
 - `check_powershell_syntax.py`: every script parses (pwsh parser).
 - CloudStack's own `ExternalDiscoveryManager.parse`, `ExternalVmConfiguration.parse` and `ExternalStorageInventory.parse`
   (release build `6fb6c184bc`) accept sample `discover`, `getconfig` and `liststorage` answers (`wirecheck/`).
+- `console_helper/test_hyperv_console_helper.py`: 6 tests (what it starts, no secret on a command line, teardown).
+- Console helper installed on the lab management server and smoke-tested with real Xvfb/x11vnc/xfreerdp3 against an
+  unreachable RDP target: one-time password accepted, a wrong one refused, sessions torn down when RDP ends. The RDP
+  half (VMConnect to a real node) is untested until the Hyper-V lab exists.
 - **Not yet run against Hyper-V.** Lab: domain controller, two Windows Server 2025 Hyper-V nodes, iSCSI CSVs, nested on HV08.

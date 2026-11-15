@@ -35,10 +35,19 @@ Host details (one CloudStack host per node): `url` (node address), `node` (node 
 
 Templates: `template_volume` = `<storage>:<path/to/disk.vhdx>`, optional `generation` (1|2), `secure_boot`, `is_full_clone`.
 
+## Console
+
+`console_helper/` serves a VM's VMConnect console (RDP, node port 2179) as VNC for CloudStack's console proxy. Install it
+on every management server (`sudo console_helper/install.sh <address the console proxy reaches>`), open TCP 5900-5999 on
+that address to the console proxy VMs only, and TCP 2179 from the management servers to every node. The cluster
+mapping's account needs VMConnect access (Hyper-V Administrators, or `Grant-VMConnectAccess`). Extension detail
+`console_helper_socket` overrides the default `/run/hyperv-console/helper.sock`.
+
 ## Tests
 
 ```sh
 cd hyperv_cluster
-python3 -m unittest test_hyperv_cluster      # 49 tests, simulated cluster
+python3 -m unittest test_hyperv_cluster      # 53 tests, simulated cluster
 python3 check_powershell_syntax.py           # needs pwsh
+cd ../console_helper && python3 -m unittest test_hyperv_console_helper   # 6 tests
 ```
