@@ -234,7 +234,7 @@ Lab build `iso-d`: jar `5ea18657a5b9e30fc1a8834cf0242ea4ea10caed4387693599e3f5d7
 
 ### Not proven
 
-- CephFS as the ISO storage, two clusters sharing it, and TPM state on Ceph. The lab has one cluster and NFS.
+- (Proven since, see below: CephFS as the ISO storage, two clusters sharing it, and TPM state on Ceph.)
 - A Windows 11 installer. Secure Boot with enrolled keys and a TPM was proven with a Microsoft-signed Linux installer.
 - The UI in a browser. The predicates are checked from source and the served bundle contains them.
 - Console on an ISO-created guest, and anything with two management servers.
@@ -251,3 +251,19 @@ Lab build `iso-d`: jar `5ea18657a5b9e30fc1a8834cf0242ea4ea10caed4387693599e3f5d7
 - `vm.iso.max.count=2`. The extension declares `instanceisosupported` and `iso_storage=labnfs`. Proxmox role `CloudStackExtensionIso` at `/storage/labnfs`.
 - ISOs kept: `lab-alpine-a`, `lab-alpine-priv`, `lab-debian13`, `isouser-alpine`, and their copies on `labnfs`. Account `isouser` and its network kept.
 - Guest 102 now has two empty drives (it had one, holding the template's ISO). Adopted guest 103 was stopped and started through CloudStack and has two empty drives. All test instances were expunged; no Proxmox guest or volume record is left from them.
+
+### CephFS and a second cluster (lab, 15 Nov 2026)
+
+The lab now has a one-node Ceph and a second Proxmox cluster (`EXTERNAL-STORAGE-DESIGN.md`, "Ceph and a second cluster"). Both clusters mount one CephFS subvolume as `iso-library`, each with its own Ceph client, and the extension's `iso_storage` is `iso-library`. No code changed.
+
+| Check | Result |
+|---|---|
+| ISO first used by a guest of one cluster, then by a guest of the other | Copied once; the second cluster finds the copy |
+| Second ISO first used from the second cluster, as a second drive on a running guest | Copied through that cluster; same QEMU process |
+| ISO held directly in Proxmox by a running adopted guest of the first cluster and a running guest of the second, then deleted in CloudStack | Both ejected, then the copy deleted once; no warning; same QEMU processes; no lease left |
+| Create from an ISO in the second cluster, BIOS and UEFI Secure, root disk on an erasure-coded Ceph tier | Pass; EFI disk and TPM state on the same Ceph pool; the signed Debian installer boots |
+| A running guest whose only CD drive holds a disc CloudStack does not record | Refused, as on NFS |
+
+Proxmox refuses a dot in a CephFS storage's `fs-name`; the file system is named with `options fs=<name>`, which is how production's storage is defined.
+
+The copies the earlier tests left on `labnfs` were held by no guest and were deleted there by hand.

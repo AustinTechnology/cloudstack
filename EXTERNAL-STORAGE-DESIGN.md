@@ -142,7 +142,7 @@ Two ways it could be wired, neither traced in the code yet:
 
 Either way CloudStack must refuse or clean up when a disk with snapshots is moved or deleted, because Proxmox will remove them.
 
-The lab has neither Ceph nor a KVM host, so this cannot be tried there as it stands.
+The lab has had both since 15 Nov 2026 (see "Ceph and a second cluster"), so this can be tried there.
 
 ## Phase 1 as built (14 Nov 2026, lab only)
 
@@ -220,8 +220,7 @@ Verified in the lab (745 unit tests, 53 extension tests), on two NFS storages wi
 
 Not tested:
 
-- **Ceph.** Both lab storages are NFS. Add, grow, delete and move on RBD, and on erasure-coded pools, have not run anywhere.
-- **Two Proxmox clusters on one pool.** The lab has one cluster.
+- Ceph and two Proxmox clusters on one pool were not tested at the time; both have been since. See "Ceph and a second cluster".
 - An unknown outcome on a real guest. The lease and recording rules for it are covered by the extension's tests against a fake Proxmox, not live.
 - A move that outlasts the wait.
 - SATA, IDE and VirtIO slots on a real guest (extension tests only); a guest with EFI or TPM disks; Windows.
@@ -234,12 +233,55 @@ Known gaps:
 - A guest deployed through CloudStack still gets its root volume record at its first refresh, not at deploy.
 - The stock resize form asks for IOPS when the first disk offering in the zone has custom IOPS. A resize that carries IOPS is refused for these volumes.
 
+## Ceph and a second cluster (lab, 15 Nov 2026)
+
+The lab gained a one-node Ceph (`dg-acs-ceph01`, 192.168.64.211, cephadm, Ceph 20, independent of Proxmox) and a second Proxmox cluster of one node (`acs-lab2`, `dg-acs-pve03`, 192.168.64.212), registered as a second External cluster of the zone with the same extension. Both Proxmox clusters define the same three storages, each cluster with its own Ceph client, as production does:
+
+| Proxmox storage | Behind it | CloudStack pool, tag, offering |
+|---|---|---|
+| `lab.ssd.ec21` | RBD, metadata pool `rbd.lab.ssd.ec21.meta`, erasure-coded data pool `rbd.lab.ssd.ec21` | `ext-lab.ssd.ec21`, `ext-lab-ssd-ec21`, "Ceph SSD EC" |
+| `lab.hdd.rep` | RBD, replicated pool `rbd.lab.hdd.rep` | `ext-lab.hdd.rep`, `ext-lab-hdd-rep`, "Ceph HDD" |
+| `iso-library` | CephFS `lab.library`, one subvolume | the ISO storage (`iso_storage` on the extension) |
+
+The NFS storages stay on the first cluster only. No code changed for any of this except the disk delete below.
+
+| Check | Result |
+|---|---|
+| Register the two RBD storages | One zone-wide pool each, bound to both clusters by what is behind the storage |
+| Running guests, first cluster: add on the erasure-coded tier, grow, move to the replicated tier, tier change back with a grow | Pass; the image has the data pool; same QEMU process |
+| Running adopted guest: root disk moved NFS (qcow2) to Ceph; a data disk moved Ceph to NFS | Pass; source removed each time; same QEMU process |
+| Guest created in the second cluster while the first has a guest with the same VMID on the same Ceph pool | Proxmox names the new image with the next free number in the pool (`vm-100-disk-1` beside the other cluster's `vm-100-disk-0`); each volume is recorded under its own name |
+| Add, grow, move on the second cluster's guest; move to a storage its cluster does not have | Pass; the last is refused: "The instance's cluster does not reach that storage" |
+| Expunge the second cluster's guest 100 | Its two images are deleted; the first cluster's guest 100 keeps both of its images on the same pools and keeps running |
+| Adopt a running guest in the second cluster whose VMID (103) is also an adopted guest of the first | Two claims, one per cluster; both disks imported under the right names; same QEMU process; stop, start, disk add and delete work |
+| Create from an ISO with UEFI, and with UEFI Secure, root disk on Ceph | EFI disk and TPM state are RBD images on the root disk's pool; the root volume is the boot disk, not the first image; the signed Debian installer boots; expunge removes all of them |
+| Refresh of every guest afterwards (dry run) | No change, nothing unresolved; account counts equal the volumes; no lease or fence |
+
+### Found and changed: a disk delete the guest does not complete
+
+A running guest that has only just started (or that holds the device) does not release a disk. Proxmox then fails the task but has already taken the disk away from the guest, and keeps the delete waiting; it deletes the image when the guest next stops. Before this change CloudStack was left with a record it could neither delete (the waiting change refused every later disk action) nor, after the stop, find.
+
+`deletedisk` now:
+
+- says "The guest has not released the disk. Delete it again once the guest has finished starting, or stop the instance first" and, for an adopted guest, releases the lease, because the state is known;
+- accepts being asked again while only its own delete is waiting, and sends the delete again;
+- succeeds without a write when the disk is in no slot of the instance, however it left;
+- deletes the disk when Proxmox holds it as an unused disk of the instance.
+
+It still refuses when the recorded volume is in a different slot (the record is stale; refresh). Shown live on the second cluster's adopted guest: failure with the message, then a second delete that succeeded; and failure, a stop (Proxmox deleted the image), then a delete that succeeded with nothing to do. Counts were right after each.
+
+### Found, not changed
+
+- **Which cluster a new instance goes to.** Stock External planning takes the first cluster that has a host Up, every time, and does not look at storage. With no host named, every new instance went to the first cluster. An instance created from an ISO on a tier whose storage only the other cluster has would fail at its first start with the stock "Unable to orchestrate the start" (nothing is created in Proxmox). Production's three tiers are on both clusters, so this only bites a storage that one cluster lacks.
+- **Adoption as root admin where two networks share a VLAN.** Refused, because root admin may use both. The lab has overlapping VLANs only because its test accounts were given them on purpose; adopting for the owning account works.
+- **A refresh of a guest with a change waiting** fails with the general "External configuration collection failed", not the reason.
+
 ## Risks
 
 - **Core changes to carry.** Phases 1 and 2 touch `VolumeApiServiceImpl`, `SnapshotManagerImpl`, `UserVmManagerImpl`, `VolumeOrchestrator`, `QueryManagerImpl`, `VolumeJoinDaoImpl`, `UserVmJoinDaoImpl` and three UI files. Phase 3 will add `VMSnapshotManagerImpl`. Each is another patch to re-apply on upgrade until upstream takes it.
 - **Billing starts at import.** Phase 1 creates usage records and raises account storage totals for over 100 TiB that CloudStack has never counted.
-- **Shared Ceph pools.** A wrong delete can reach another cluster's guest. The identity rule and the explicit "no unreferenced cleanup" are the controls; the lab cannot reproduce two clusters on one pool as it stands.
-- **The lab has no Ceph.** Its storages are NFS and a local directory. RBD behaviour (erasure-coded data pools, move between pools) would first be exercised in production unless the lab gets a Ceph pool.
+- **Shared Ceph pools.** A wrong delete can reach another cluster's guest. The identity rule and the explicit "no unreferenced cleanup" are the controls. The lab now has two clusters on one pool and a guest with the same VMID in each: deleting one left the other's images alone.
+- **The lab's Ceph is one node.** It proves RBD behaviour (erasure-coded data pools, moves between pools) but nothing about speed, and both clusters list the same single monitor, so "one monitor in common" between different monitor lists is still covered by unit tests only.
 
 ## Decided (14 Nov 2026)
 
