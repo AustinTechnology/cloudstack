@@ -4523,6 +4523,13 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                     "; make sure the virtual machine is stopped/running");
         }
 
+        // An External instance's HA flag mirrors the orchestrator's HA and is kept across an offering change,
+        // so the new offering has to allow it
+        if (HypervisorType.External.equals(vmInstance.getHypervisorType()) && vmInstance.isHaEnabled() && !newServiceOffering.isOfferHA()) {
+            throw new InvalidParameterValueException("The instance has HA enabled and the new service offering does not offer HA. "
+                    + "Choose an offering with HA, or turn HA off first");
+        }
+
         if (!newServiceOffering.isDynamic() && vmInstance.getServiceOfferingId() == newServiceOffering.getId()) {
             logger.info("Not upgrading vm {} since it already has the requested service offering ({})", vmInstance.toString(), newServiceOffering.getName());
 
@@ -4589,7 +4596,10 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         final VMInstanceVO vmForUpdate = _vmDao.findById(vmId);
         vmForUpdate.setServiceOfferingId(newServiceOffering.getId());
         final ServiceOffering newSvcOff = _entityMgr.findById(ServiceOffering.class, newServiceOffering.getId());
-        vmForUpdate.setHaEnabled(newSvcOff.isOfferHA());
+        // An External instance keeps its HA flag: it mirrors the orchestrator's HA, which an offering change does not touch
+        if (!HypervisorType.External.equals(vmForUpdate.getHypervisorType())) {
+            vmForUpdate.setHaEnabled(newSvcOff.isOfferHA());
+        }
         vmForUpdate.setLimitCpuUse(newSvcOff.getLimitCpuUse());
         vmForUpdate.setServiceOfferingId(newSvcOff.getId());
         if (newServiceOffering.isDynamic()) {

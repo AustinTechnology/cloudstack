@@ -496,6 +496,30 @@ public class VirtualMachineManagerImplTest {
     }
 
     @Test(expected = InvalidParameterValueException.class)
+    public void checkIfCanUpgradeRefusesExternalHaInstanceToOfferingWithoutHa() {
+        when(vmInstanceMock.getState()).thenReturn(State.Stopped);
+        when(vmInstanceMock.getHypervisorType()).thenReturn(HypervisorType.External);
+        when(vmInstanceMock.isHaEnabled()).thenReturn(true);
+        when(serviceOfferingMock.isOfferHA()).thenReturn(false);
+
+        virtualMachineManagerImpl.checkIfCanUpgrade(vmInstanceMock, serviceOfferingMock);
+    }
+
+    @Test
+    public void upgradeVmDbKeepsExternalHaFlag() {
+        VMInstanceVO vm = new VMInstanceVO(10L, 1L, "i-2-10-VM", "i-2-10-VM", VirtualMachine.Type.User, 1L, HypervisorType.External, 1L, 1L, 1L, 1L, false, false);
+        when(vmInstanceDaoMock.findById(10L)).thenReturn(vm);
+        when(serviceOfferingMock.getId()).thenReturn(2L);
+        when(_entityMgr.findById(ServiceOffering.class, 2L)).thenReturn(serviceOfferingMock);
+        Mockito.lenient().when(serviceOfferingMock.isOfferHA()).thenReturn(true);
+        when(vmInstanceDaoMock.update(anyLong(), any())).thenReturn(true);
+        ReflectionTestUtils.setField(virtualMachineManagerImpl, "_userVmMgr", mock(UserVmManager.class));
+
+        virtualMachineManagerImpl.upgradeVmDb(10L, serviceOfferingMock, serviceOfferingMock);
+        assertFalse(vm.isHaEnabled());
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
     public void testCheckIfCanUpgradeFail() {
         when(serviceOfferingMock.getState()).thenReturn(ServiceOffering.State.Inactive);
 
