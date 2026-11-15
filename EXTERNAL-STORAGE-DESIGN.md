@@ -121,6 +121,8 @@ Production has none of these offerings yet: its disk offerings are three fixed s
 
 ### Per-disk snapshots on Ceph (to investigate)
 
+Investigated 15 Nov 2026: findings and the proposed design are in `EXTERNAL-VOLUME-SNAPSHOT-PLAN.md`. The notes below are the earlier starting point.
+
 Proxmox has no per-disk snapshot, but 210 of the 217 disks are RBD images, and Ceph can snapshot one image.
 
 What is known:
