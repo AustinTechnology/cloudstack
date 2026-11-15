@@ -27,6 +27,13 @@ public class ExternalDiscoveryManagerTest {
         assertEquals(100L, ExternalDiscoveryManager.parse(snapshot(row("100")),"lab").get(0).getVmid());
         assertTrue(ExternalDiscoveryManager.parse(snapshot(""),"lab").isEmpty());
     }
+    @Test public void reportsHaStateWhenGiven() {
+        String ha=row("101").replace("}",",\"hastate\":\"started\"}");
+        assertEquals("started", ExternalDiscoveryManager.parse(snapshot(ha),"lab").get(0).getHaState());
+        assertNull(ExternalDiscoveryManager.parse(snapshot(row("100")),"lab").get(0).getHaState());
+        String bad=row("101").replace("}",",\"hastate\":\"Started; x\"}");
+        assertThrows(InvalidParameterValueException.class,()->ExternalDiscoveryManager.parse(snapshot(bad),"lab"));
+    }
     @Test public void rejectsDuplicateAndWrongCluster() {
         assertThrows(InvalidParameterValueException.class,()->ExternalDiscoveryManager.parse(snapshot(row("100")+","+row("100")),"lab"));
         assertThrows(InvalidParameterValueException.class,()->ExternalDiscoveryManager.parse(snapshot(row("100")),"other"));

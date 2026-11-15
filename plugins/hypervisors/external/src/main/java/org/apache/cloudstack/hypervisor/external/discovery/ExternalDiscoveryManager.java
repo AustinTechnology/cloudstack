@@ -89,7 +89,10 @@ public class ExternalDiscoveryManager extends ManagerBase implements PluggableSe
                 if (vmid<=0 || !ids.add(vmid) || !node.matches("[A-Za-z0-9][A-Za-z0-9.-]*")
                     || !Set.of("qemu","lxc").contains(type) || !Set.of("running","stopped","unknown").contains(power)
                     || !row.get("template").isJsonPrimitive() || !row.getAsJsonPrimitive("template").isBoolean()) throw new IllegalArgumentException();
-                result.add(new ExternalInstanceResponse(expectedCluster,vmid,node,name,type,power,row.get("template").getAsBoolean()));
+                // The orchestrator's HA state ("" when the instance is not under its HA). Optional for older scripts.
+                String haState=row.has("hastate") ? text(row,"hastate") : null;
+                if (haState!=null && !haState.matches("[a-z-]{0,32}")) throw new IllegalArgumentException();
+                result.add(new ExternalInstanceResponse(expectedCluster,vmid,node,name,type,power,row.get("template").getAsBoolean(),haState));
             }
             return result;
         } catch (RuntimeException e) { throw new InvalidParameterValueException("Invalid or ambiguous external inventory snapshot"); }

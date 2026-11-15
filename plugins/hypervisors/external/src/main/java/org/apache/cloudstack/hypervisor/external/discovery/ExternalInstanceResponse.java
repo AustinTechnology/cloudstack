@@ -27,11 +27,13 @@ public class ExternalInstanceResponse extends BaseResponse {
     @SerializedName("type") private String type;
     @SerializedName("power") private String power;
     @SerializedName("template") private boolean template;
+    @SerializedName("hastate") private String haState;
     public ExternalInstanceResponse(String cluster, long vmid, String node, String name,
-                                    String type, String power, boolean template) {
+                                    String type, String power, boolean template, String haState) {
         this.cluster=cluster; this.vmid=vmid; this.node=node; this.name=name;
-        this.type=type; this.power=power; this.template=template;
+        this.type=type; this.power=power; this.template=template; this.haState=haState;
         setObjectName("externalinstance");
     }
     public long getVmid() { return vmid; }
+    public String getHaState() { return haState; }
 }
