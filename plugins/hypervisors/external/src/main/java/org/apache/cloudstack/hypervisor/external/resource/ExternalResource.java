@@ -145,9 +145,35 @@ public class ExternalResource implements ServerResource {
                 return null;
             }
         }
+        // Real node capacity when the extension reports host statistics; zero (as before) otherwise. The totals are
+        // read on each (re)connect, so a hardware change shows after the host reconnects.
+        int cpus = CPU;
+        long cpuSpeed = CPU_SPEED;
+        long ram = RAM;
+        int sockets = 0;
+        if (!isExtensionDisconnected()) {
+            try {
+                JsonObject values = metricsResponse(externalProvisioner.getMetrics(guid, extensionName, extensionRelativePath, false));
+                if (values != null) {
+                    double count = required(values, "cpus");
+                    double memoryKb = required(values, "total_memory_kb");
+                    if (count >= 1 && count == Math.floor(count) && memoryKb > 0) {
+                        cpus = (int) count;
+                        ram = (long) memoryKb * 1024L;
+                        cpuSpeed = (long) number(values, "cpu_speed_mhz", 0);
+                        sockets = (int) number(values, "cpu_sockets", 0);
+                    }
+                }
+            } catch (Exception e) {
+                logger.debug("Could not read the capacity of External host {}", name);
+            }
+        }
         final StartupRoutingCommand cmd =
-                new StartupRoutingCommand(CPU, CPU_SPEED, RAM, DOM0_RAM, CAPABILITIES,
+                new StartupRoutingCommand(cpus, cpuSpeed, ram, DOM0_RAM, CAPABILITIES,
                         Hypervisor.HypervisorType.External,Networks.RouterPrivateIpStrategy.HostLocal);
+        if (sockets > 0) {
+            cmd.setCpuSockets(sockets);
+        }
         cmd.setDataCenter(dcId);
         cmd.setPod(pod);
         cmd.setCluster(cluster);

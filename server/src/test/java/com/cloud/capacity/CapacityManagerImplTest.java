@@ -179,4 +179,19 @@ public class CapacityManagerImplTest {
                 eq(ByteScaleUtils.mebibytesToBytes(OFFERING_MEMORY)),
                 eq(false), eq(cpuOvercommit), eq(memoryOvercommit), eq(false));
     }
+
+    @Test
+    public void externalHostsWithoutReportedCapacityKeepNoCapacityRows() {
+        Host external = mock(Host.class);
+        when(external.getHypervisorType()).thenReturn(com.cloud.hypervisor.Hypervisor.HypervisorType.External);
+        when(external.getCpus()).thenReturn(0);
+        // Returns before touching any DAO (none are mocked here).
+        capacityManager.updateCapacityForHost(external);
+        when(external.getCpus()).thenReturn(8);
+        when(external.getTotalMemory()).thenReturn(0L);
+        capacityManager.updateCapacityForHost(external);
+        org.junit.Assert.assertFalse(CapacityManagerImpl.hasReportedCapacity(external));
+        when(external.getTotalMemory()).thenReturn(8L << 30);
+        org.junit.Assert.assertTrue(CapacityManagerImpl.hasReportedCapacity(external));
+    }
 }

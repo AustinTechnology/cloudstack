@@ -330,4 +330,22 @@ public class ExternalResourceTest {
         connected(mock(ExternalProvisioner.class));
         assertFalse(externalResource.executeRequest(new com.cloud.agent.api.PingTestCommand("External")).getResult());
     }
+
+    @Test
+    public void startupReportsTheNodeCapacityWhenTheExtensionReportsHostStatistics() {
+        ExternalProvisioner provisioner = mock(ExternalProvisioner.class);
+        connected(provisioner);
+        when(provisioner.getHostHealth("g1", null)).thenReturn("up");
+        when(provisioner.getMetrics("g1", "ext", "ext/ext.py", false)).thenReturn("{\"status\":\"success\",\"timestamp\":1,"
+                + "\"cpu_utilization\":5,\"cpus\":16,\"cpu_speed_mhz\":2100,\"cpu_sockets\":2,\"total_memory_kb\":67108864,\"free_memory_kb\":1}");
+        com.cloud.agent.api.StartupRoutingCommand startup = (com.cloud.agent.api.StartupRoutingCommand) externalResource.initialize()[0];
+        assertEquals(16, startup.getCpus());
+        assertEquals(2100L, startup.getSpeed());
+        assertEquals(64L << 30, startup.getMemory());
+        assertEquals(Integer.valueOf(2), startup.getCpuSockets());
+        when(provisioner.getMetrics("g1", "ext", "ext/ext.py", false)).thenReturn(null);
+        startup = (com.cloud.agent.api.StartupRoutingCommand) externalResource.initialize()[0];
+        assertEquals(0, startup.getCpus());
+        assertEquals(0L, startup.getMemory());
+    }
 }

@@ -666,10 +666,16 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
                         UsageEventVO.DynamicParameters.cpuSpeed.name()));
     }
 
+    static boolean hasReportedCapacity(Host host) {
+        return host.getCpus() != null && host.getCpus() > 0 && host.getTotalMemory() != null && host.getTotalMemory() > 0;
+    }
+
     @DB
     @Override
     public void updateCapacityForHost(final Host host) {
-        if (HypervisorType.External.equals(host.getHypervisorType())) {
+        // External hosts have capacity rows only when their extension reports the node's real CPU and memory, so
+        // dashboards show them; placement still skips External capacity checks.
+        if (HypervisorType.External.equals(host.getHypervisorType()) && !hasReportedCapacity(host)) {
             return;
         }
         long usedCpuCore = 0;
