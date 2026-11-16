@@ -19,6 +19,12 @@ package org.apache.cloudstack.hypervisor.external.resource;
 import java.util.HashMap;
 import java.util.Map;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.cloud.agent.api.GetVmStatsAnswer;
+import com.cloud.agent.api.HostStatsEntry;
+import com.cloud.agent.api.VmStatsEntry;
+
 import javax.naming.ConfigurationException;
 
 import org.apache.cloudstack.extension.Extension;
@@ -297,9 +303,103 @@ public class ExternalResource implements ServerResource {
         return new Answer(cmd, false, "Not supported");
     }
 
-    private Answer execute(GetVmStatsCommand cmd) {
+    private static class VmSample {
+        final double timestamp;
+        final JsonObject counters;
+        VmSample(double timestamp, JsonObject counters) {
+            this.timestamp = timestamp;
+            this.counters = counters;
+        }
+    }
+
+    private final Map<String, VmSample> vmSamples = new HashMap<>();
+
+    private static double number(JsonObject obj, String key, double unknown) {
+        if (!obj.has(key) || obj.get(key).isJsonNull()) {
+            return unknown;
+        }
+        double value = obj.get(key).getAsDouble();
+        if (!Double.isFinite(value) || value < 0) {
+            throw new IllegalArgumentException("Invalid metrics value");
+        }
+        return value;
+    }
+
+    private static double required(JsonObject obj, String key) {
+        double value = number(obj, key, -1);
+        if (value < 0) {
+            throw new IllegalArgumentException("Missing metrics value");
+        }
+        return value;
+    }
+
+    private static JsonObject metricsResponse(String response) {
+        if (response == null) {
+            return null;
+        }
+        JsonObject obj = JsonParser.parseString(response).getAsJsonObject();
+        if (!obj.has("status") || !"success".equals(obj.get("status").getAsString())) {
+            return null;
+        }
+        required(obj, "timestamp");
+        return obj;
+    }
+
+    private static double delta(JsonObject current, JsonObject previous, String field, double divisor) {
+        double now = number(current, field, -1);
+        double before = previous == null ? -1 : number(previous, field, -1);
+        return now < 0 || before < 0 || now < before ? 0 : (now - before) / divisor;
+    }
+
+    private synchronized Answer execute(GetVmStatsCommand cmd) {
         if (isExtensionDisconnected()) {
             return new Answer(cmd, false, logAndGetExtensionNotConnectedOrDisabledError());
+        }
+        try {
+            JsonObject response = metricsResponse(externalProvisioner.getMetrics(guid, extensionName, extensionRelativePath, true));
+            if (response != null && response.has("vms") && response.get("vms").isJsonObject()) {
+                double timestamp = required(response, "timestamp");
+                JsonObject vms = response.getAsJsonObject("vms");
+                HashMap<String, VmStatsEntry> result = new HashMap<>();
+                Map<String, VmSample> next = new HashMap<>();
+                for (String vm : cmd.getVmNames()) {
+                    if (!vms.has(vm) || !vms.get(vm).isJsonObject()) {
+                        continue;
+                    }
+                    JsonObject values = vms.getAsJsonObject(vm);
+                    VmSample previous = vmSamples.get(vm);
+                    if (previous != null && timestamp <= previous.timestamp) {
+                        throw new IllegalArgumentException("Non-increasing metrics timestamp");
+                    }
+                    VmStatsEntry stats = new VmStatsEntry();
+                    double cpus = required(values, "cpus");
+                    double cpu = required(values, "cpu_utilization");
+                    if (cpus < 1 || cpus > Integer.MAX_VALUE || cpus != Math.floor(cpus) || cpu > 100) {
+                        throw new IllegalArgumentException("Invalid CPU metrics");
+                    }
+                    stats.setNumCPUs((int) cpus);
+                    stats.setCPUUtilization(cpu);
+                    stats.setMemoryKBs(required(values, "memory_kb"));
+                    stats.setIntFreeMemoryKBs(number(values, "memory_free_kb", -1));
+                    stats.setTargetMemoryKBs(number(values, "memory_target_kb", -1));
+                    stats.setEntityType("vm");
+                    JsonObject old = previous == null ? null : previous.counters;
+                    stats.setNetworkReadKBs(delta(values, old, "network_rx_bytes", 1024));
+                    stats.setNetworkWriteKBs(delta(values, old, "network_tx_bytes", 1024));
+                    stats.setDiskReadKBs(delta(values, old, "disk_read_bytes", 1024));
+                    stats.setDiskWriteKBs(delta(values, old, "disk_write_bytes", 1024));
+                    stats.setDiskReadIOs(delta(values, old, "disk_read_ios", 1));
+                    stats.setDiskWriteIOs(delta(values, old, "disk_write_ios", 1));
+                    result.put(vm, stats);
+                    next.put(vm, new VmSample(timestamp, values));
+                }
+                // Missing requested VMs lose their baseline so a later restart starts at zero.
+                cmd.getVmNames().forEach(vmSamples::remove);
+                vmSamples.putAll(next);
+                return new GetVmStatsAnswer(cmd, result);
+            }
+        } catch (Exception e) {
+            logger.debug("Could not collect External instance metrics for host {}", name);
         }
         return new Answer(cmd, false, "Not supported");
     }
@@ -311,6 +411,26 @@ public class ExternalResource implements ServerResource {
     public GetHostStatsAnswer execute(GetHostStatsCommand cmd) {
         if (isExtensionDisconnected()) {
             logAndGetExtensionNotConnectedOrDisabledError();
+        } else {
+            try {
+                JsonObject values = metricsResponse(externalProvisioner.getMetrics(guid, extensionName, extensionRelativePath, false));
+                if (values != null) {
+                    double cpu = required(values, "cpu_utilization");
+                    double cpus = required(values, "cpus");
+                    double total = required(values, "total_memory_kb");
+                    double free = required(values, "free_memory_kb");
+                    if (cpu > 100 || cpus < 1 || cpus != Math.floor(cpus) || free > total) {
+                        throw new IllegalArgumentException("Invalid host metrics");
+                    }
+                    HostStatsEntry stats = new HostStatsEntry(cmd.getHostId(), cpu,
+                            number(values, "network_rx_bytes", 0) / 1024,
+                            number(values, "network_tx_bytes", 0) / 1024, "host", total, free, 0,
+                            number(values, "load_average", -1));
+                    return new GetHostStatsAnswer(cmd, stats);
+                }
+            } catch (Exception e) {
+                logger.debug("Could not collect External host metrics for host {}", name);
+            }
         }
         return new GetHostStatsAnswer(cmd, null);
     }

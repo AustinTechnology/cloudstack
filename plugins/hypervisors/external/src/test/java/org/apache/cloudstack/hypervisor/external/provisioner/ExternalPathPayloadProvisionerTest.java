@@ -116,6 +116,37 @@ import com.cloud.vm.dao.VMInstanceDao;
 public class ExternalPathPayloadProvisionerTest {
 
     @Test
+    public void metricsCapabilityGateAvoidsExtensionDispatch() {
+        HostVO host = mock(HostVO.class);
+        when(hostDao.findByGuid("guid")).thenReturn(host);
+        when(extensionsManager.getExternalAccessDetails(host, null)).thenReturn(Map.of("extension", Map.of()));
+        assertNull(provisioner.getMetrics("guid", "ext", "relative", true));
+        assertNull(provisioner.getMetrics("guid", "ext", "relative", false));
+        verify(provisioner, never()).executeExternalCommand(any(), any(), anyMap(), anyInt(), any(), any());
+    }
+
+    @Test
+    public void vmMetricsUseOneHostBatchAndNativeBindings() {
+        HostVO host = mock(HostVO.class);
+        when(hostDao.findByGuid("guid")).thenReturn(host);
+        Map<String, Map<String, String>> details = new HashMap<>();
+        details.put("host", new HashMap<>(Map.of("native_adoption_status", "true", "proxmox_cluster", "lab")));
+        details.put("extension", new HashMap<>(Map.of("instancestatssupported", "true")));
+        when(extensionsManager.getExternalAccessDetails(host, null)).thenReturn(details);
+        doReturn("/checked").when(provisioner).getExtensionCheckedPath("ext", "relative");
+        doReturn(Map.of("101", new AdoptionRegistry.StatusBinding("i-1-VM", "guest", "hash", "managed")))
+                .when(provisioner).nativeStatusBindings("lab");
+        doReturn(new Pair<>(true, "{\"status\":\"success\",\"timestamp\":1,\"vms\":{}}"))
+                .when(provisioner).executeExternalCommand(eq("ext"), eq("vmstats"), anyMap(), eq(60), anyString(), eq("/checked"));
+        assertNotNull(provisioner.getMetrics("guid", "ext", "relative", true));
+        org.mockito.ArgumentCaptor<Map> payload = org.mockito.ArgumentCaptor.forClass(Map.class);
+        verify(provisioner).executeExternalCommand(eq("ext"), eq("vmstats"), payload.capture(), eq(60), anyString(), eq("/checked"));
+        assertEquals(Map.of("101", Map.of("cloudstack_instance_name", "i-1-VM", "expected_proxmox_name", "guest")),
+                payload.getValue().get("native_adoption_status_bindings"));
+        assertEquals(details, payload.getValue().get("externaldetails"));
+    }
+
+    @Test
     public void nativeStatusMapIsRegistryAuthoredAndExplicitlyOptedIn() {
         Map<String, Map<String, String>> details = new HashMap<>();
         details.put("host", new HashMap<>(Map.of("proxmox_cluster", "lab", "native_adoption_status", "true")));

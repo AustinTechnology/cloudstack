@@ -119,6 +119,82 @@ public class ExternalResourceTest {
     }
 
     @Test
+    public void metricsUnavailablePreservesLegacyAnswers() {
+        ExternalProvisioner provisioner = readyResourceWithProvisioner();
+        com.cloud.agent.api.GetVmStatsCommand vm = new com.cloud.agent.api.GetVmStatsCommand(java.util.List.of("vm"), "External:guid", "host");
+        Answer answer = externalResource.executeRequest(vm);
+        assertFalse(answer.getResult());
+        assertEquals("Not supported", answer.getDetails());
+        assertEquals(null, externalResource.execute(new com.cloud.agent.api.GetHostStatsCommand("External:guid", "host", 1)).getHostStats());
+        when(provisioner.getMetrics(any(), any(), any(), org.mockito.ArgumentMatchers.eq(true))).thenThrow(new RuntimeException("failure"));
+        assertEquals("Not supported", externalResource.executeRequest(vm).getDetails());
+    }
+
+    private String vmMetrics(int time, long rx, long tx, long read, long write, String ios) {
+        return "{\"status\":\"success\",\"timestamp\":" + time + ",\"vms\":{\"vm\":{" +
+                "\"cpus\":2,\"cpu_utilization\":25,\"memory_kb\":4096,\"memory_free_kb\":null,\"memory_target_kb\":2048," +
+                "\"network_rx_bytes\":" + rx + ",\"network_tx_bytes\":" + tx + ",\"disk_read_bytes\":" + read +
+                ",\"disk_write_bytes\":" + write + ",\"disk_read_ios\":" + ios + ",\"disk_write_ios\":null}," +
+                "\"other\":{}}}";
+    }
+
+    @Test
+    public void instanceMetricsUseDeltasResetAndOnlyRequestedNames() {
+        ExternalProvisioner p = readyResourceWithProvisioner();
+        when(p.getMetrics(any(), any(), any(), org.mockito.ArgumentMatchers.eq(true)))
+                .thenReturn(vmMetrics(1, 1024, 2048, 4096, 8192, "10"),
+                        vmMetrics(2, 3072, 3072, 5120, 10240, "15"),
+                        vmMetrics(3, 1, 4096, 1024, 11264, "2"));
+        com.cloud.agent.api.GetVmStatsCommand cmd = new com.cloud.agent.api.GetVmStatsCommand(java.util.List.of("vm", "absent"), "External:guid", "host");
+        com.cloud.agent.api.VmStatsEntry first = ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap().get("vm");
+        assertEquals(0, first.getNetworkReadKBs(), 0);
+        assertEquals(25, first.getCPUUtilization(), 0);
+        assertEquals(4096, first.getMemoryKBs(), 0);
+        assertEquals(-1, first.getIntFreeMemoryKBs(), 0);
+        assertEquals(2048, first.getTargetMemoryKBs(), 0);
+        com.cloud.agent.api.GetVmStatsAnswer second = (com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd);
+        assertEquals(1, second.getVmStatsMap().size());
+        com.cloud.agent.api.VmStatsEntry s = second.getVmStatsMap().get("vm");
+        assertEquals(2, s.getNetworkReadKBs(), 0);
+        assertEquals(1, s.getNetworkWriteKBs(), 0);
+        assertEquals(1, s.getDiskReadKBs(), 0);
+        assertEquals(2, s.getDiskWriteKBs(), 0);
+        assertEquals(5, s.getDiskReadIOs(), 0);
+        assertEquals(0, s.getDiskWriteIOs(), 0);
+        s = ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap().get("vm");
+        assertEquals(0, s.getNetworkReadKBs(), 0);
+        assertEquals(0, s.getDiskReadIOs(), 0);
+        assertEquals(1, s.getNetworkWriteKBs(), 0);
+    }
+
+    @Test
+    public void outOfOrderSamplesFailWithoutReplacingBaseline() {
+        ExternalProvisioner p = readyResourceWithProvisioner();
+        when(p.getMetrics(any(), any(), any(), org.mockito.ArgumentMatchers.eq(true)))
+                .thenReturn(vmMetrics(2, 1024, 0, 0, 0, "null"), vmMetrics(1, 2048, 0, 0, 0, "null"), vmMetrics(3, 3072, 0, 0, 0, "null"));
+        com.cloud.agent.api.GetVmStatsCommand cmd = new com.cloud.agent.api.GetVmStatsCommand(java.util.List.of("vm"), "External:guid", "host");
+        externalResource.executeRequest(cmd);
+        assertFalse(externalResource.executeRequest(cmd).getResult());
+        assertEquals(2, ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap().get("vm").getNetworkReadKBs(), 0);
+    }
+
+    @Test
+    public void hostMetricsAreCumulativeKiBAndMalformedResponseIsNull() {
+        ExternalProvisioner p = readyResourceWithProvisioner();
+        when(p.getMetrics(any(), any(), any(), org.mockito.ArgumentMatchers.eq(false)))
+                .thenReturn("{\"status\":\"success\",\"timestamp\":1,\"cpus\":4,\"cpu_utilization\":40,\"total_memory_kb\":8192,\"free_memory_kb\":2048,\"network_rx_bytes\":4096,\"network_tx_bytes\":8192,\"load_average\":null}", "invalid");
+        com.cloud.agent.api.GetHostStatsCommand cmd = new com.cloud.agent.api.GetHostStatsCommand("External:guid", "host", 1);
+        com.cloud.host.HostStats s = externalResource.execute(cmd).getHostStats();
+        assertEquals(40, s.getCpuUtilization(), 0);
+        assertEquals(8192, s.getTotalMemoryKBs(), 0);
+        assertEquals(2048, s.getFreeMemoryKBs(), 0);
+        assertEquals(4, s.getNetworkReadKBs(), 0);
+        assertEquals(8, s.getNetworkWriteKBs(), 0);
+        assertEquals(-1, s.getLoadAverage(), 0);
+        assertEquals(null, externalResource.execute(cmd).getHostStats());
+    }
+
+    @Test
     public void nicCommandsHaveTypedAnswersAndUseTheProvisioner() {
         ExternalProvisioner provisioner = readyResourceWithProvisioner();
         PlugNicCommand plug = new PlugNicCommand(null, "i-2-1-VM", VirtualMachine.Type.User);

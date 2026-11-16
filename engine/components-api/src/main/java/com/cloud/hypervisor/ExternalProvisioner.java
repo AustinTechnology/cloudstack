@@ -90,6 +90,11 @@ public interface ExternalProvisioner extends Manager {
         return null;
     }
 
+    /** Returns a capability-gated, raw extension metrics response, or null when unavailable. */
+    default String getMetrics(String hostGuid, String extensionName, String extensionRelativePath, boolean instances) {
+        return null;
+    }
+
     GetExternalConsoleAnswer getInstanceConsole(String hostGuid, String extensionName, String extensionRelativePath, GetExternalConsoleCommand cmd);
 
     RunCustomActionAnswer runCustomAction(String hostGuid, String extensionName, String extensionRelativePath, RunCustomActionCommand cmd);

@@ -787,6 +787,41 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         return vmStates;
     }
 
+    @Override
+    public String getMetrics(String hostGuid, String extensionName, String extensionRelativePath, boolean instances) {
+        HostVO host = hostGuid == null ? null : hostDao.findByGuid(hostGuid);
+        if (host == null) {
+            return null;
+        }
+        Map<String, Map<String, String>> details = extensionsManager.getExternalAccessDetails(host, null);
+        Map<String, String> extension = details == null ? null : details.get(ApiConstants.EXTENSION);
+        if (extension == null || !"true".equals(extension.get("instancestatssupported"))) {
+            return null;
+        }
+        String path = getExtensionCheckedPath(extensionName, extensionRelativePath);
+        if (StringUtils.isEmpty(path)) {
+            return null;
+        }
+        Map<String, Object> payload = loadAccessDetails(details, null);
+        if (instances) {
+            // Exclude inconsistent native claims even if an extension returns a matching provider name.
+            List<String> unknown = addNativeStatusBindings(details, payload);
+            Pair<Boolean, String> result = executeExternalCommand(extensionName, "vmstats", payload, 60,
+                    "Failed to fetch instance metrics", path);
+            if (result == null || !Boolean.TRUE.equals(result.first()) || StringUtils.isBlank(result.second())) {
+                return null;
+            }
+            JsonObject response = JsonParser.parseString(result.second()).getAsJsonObject();
+            if (response.has("vms") && response.get("vms").isJsonObject()) {
+                unknown.forEach(name -> response.getAsJsonObject("vms").remove(name));
+            }
+            return response.toString();
+        }
+        Pair<Boolean, String> result = executeExternalCommand(extensionName, "hoststats", payload, 60,
+                "Failed to fetch host metrics", path);
+        return result != null && Boolean.TRUE.equals(result.first()) ? result.second() : null;
+    }
+
     static final String HOST_HEALTH_SUPPORTED = "hosthealthsupported";
     private static final int HOST_HEALTH_WAIT = 60;
 
