@@ -115,7 +115,7 @@ class FakeCluster:
                                               for vm in self.vms.values() if vm["node"].lower() == node]}
 
     def s_hoststats(self, node, args):
-        return {"node": node.upper(), "cpu_utilization": 25, "cpus": 4, "total_memory_kb": 10000,
+        return {"node": node.upper(), "cpu_utilization": 25, "cpus": 4, "cpu_speed_mhz": 2100, "cpu_sockets": 1, "total_memory_kb": 10000,
                 "free_memory_kb": 5000, "network_rx_bytes": 100, "network_tx_bytes": 200, "load_average": None}
 
     def s_vmstats(self, node, args):
@@ -633,6 +633,7 @@ class NativeAdoption(Base):
         rc, out = self.run_action("hoststats", payload())
         self.assertEqual(rc, 0, out)
         self.assertEqual(out["cpus"], 4)
+        self.assertEqual((out["cpu_speed_mhz"], out["cpu_sockets"]), (2100, 1))
         self.assertEqual(out["network_rx_bytes"], 100)
         self.assertIsNone(out["load_average"])
         self.assertEqual([c[1] for c in self.c.calls], ["hoststats"])

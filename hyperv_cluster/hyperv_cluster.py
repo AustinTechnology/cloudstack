@@ -176,7 +176,8 @@ $run = 0.0; foreach ($x in $b) { $y = $a | Where-Object Name -eq $x.Name; $run +
 $elapsed = [double]$b[0].Timestamp_Sys100NS - [double]$a[0].Timestamp_Sys100NS
 if ($elapsed -le 0) { Unchanged 'Hyper-V logical processor counters did not advance' }
 $cpu = [pscustomobject]@{ PercentTotalRunTime = [Math]::Max(0, [Math]::Min(100, 100 * $run / ($elapsed * $b.Count))) }
-$cpus = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+$cs = Get-CimInstance Win32_ComputerSystem; $cpus = $cs.NumberOfLogicalProcessors
+$mhz = (@(Get-CimInstance Win32_Processor) | Select-Object -First 1).MaxClockSpeed
 $rx = $null; $tx = $null
 try {
   $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop)
@@ -188,7 +189,8 @@ try {
   }
 } catch { $rx = $null; $tx = $null }
 [pscustomobject]@{ node = [string]$env:COMPUTERNAME; cpu_utilization = [double]$cpu.PercentTotalRunTime
-  cpus = [int]$cpus; total_memory_kb = [int64]$os.TotalVisibleMemorySize; free_memory_kb = [int64]$os.FreePhysicalMemory
+  cpus = [int]$cpus; cpu_speed_mhz = $(if ($mhz -gt 0) { [int]$mhz } else { $null }); cpu_sockets = [int]$cs.NumberOfProcessors
+  total_memory_kb = [int64]$os.TotalVisibleMemorySize; free_memory_kb = [int64]$os.FreePhysicalMemory
   network_rx_bytes = $rx; network_tx_bytes = $tx; load_average = $null }
 """,
     "vmstats": r"""
@@ -1288,7 +1290,8 @@ class Extension:
 
     def do_hoststats(self):
         view = self.stats_view("hoststats")
-        fields = ("cpu_utilization", "cpus", "total_memory_kb", "free_memory_kb", "network_rx_bytes", "network_tx_bytes", "load_average")
+        fields = ("cpu_utilization", "cpus", "cpu_speed_mhz", "cpu_sockets", "total_memory_kb", "free_memory_kb",
+                  "network_rx_bytes", "network_tx_bytes", "load_average")
         return dict(status="success", timestamp=time.time(), **{k: view.get(k) for k in fields})
 
     def do_vmstats(self):
