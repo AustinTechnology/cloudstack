@@ -20,13 +20,20 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.List;
 
 import org.junit.Test;
 
 import com.cloud.ha.Investigator;
 import com.cloud.host.Host;
+import com.cloud.host.HostVO;
 import com.cloud.host.Status;
+import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.ExternalProvisioner;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.vm.VirtualMachine;
 
@@ -48,8 +55,64 @@ public class ExternalInvestigatorTest {
         investigator.isVmAlive(vm, mock(Host.class));
     }
 
+    private HostVO host(long id, Status status, String guid) {
+        HostVO h = mock(HostVO.class);
+        when(h.getId()).thenReturn(id);
+        when(h.getStatus()).thenReturn(status);
+        when(h.getType()).thenReturn(Host.Type.Routing);
+        when(h.getGuid()).thenReturn(guid);
+        when(h.getClusterId()).thenReturn(7L);
+        when(h.getHypervisorType()).thenReturn(HypervisorType.External);
+        return h;
+    }
+
+    private ExternalInvestigator withHealth(ExternalProvisioner provisioner, HostVO... cluster) {
+        ExternalInvestigator inv = new ExternalInvestigator();
+        inv.externalProvisioner = provisioner;
+        inv.hostDao = mock(HostDao.class);
+        when(inv.hostDao.findByClusterId(7L)).thenReturn(List.of(cluster));
+        return inv;
+    }
+
     @Test
-    public void externalHostIsNeverReportedDown() {
+    public void hostIsDownOnlyWhenUnreachableAndAPeerConfirms() {
+        HostVO dead = host(9, Status.Up, "g9"), peer = host(8, Status.Up, "g8");
+        ExternalProvisioner p = mock(ExternalProvisioner.class);
+        when(p.getHostHealth("g9", null)).thenReturn("unknown");
+        when(p.getHostHealth("g8", 9L)).thenReturn("down");
+        assertEquals(Status.Down, withHealth(p, dead, peer).getHostAgentStatus(dead));
+    }
+
+    @Test
+    public void unreachableHostThatPeersSeeUpIsDisconnected() {
+        HostVO dead = host(9, Status.Up, "g9"), peer = host(8, Status.Up, "g8");
+        ExternalProvisioner p = mock(ExternalProvisioner.class);
+        when(p.getHostHealth("g9", null)).thenReturn("unknown");
+        when(p.getHostHealth("g8", 9L)).thenReturn("up");
+        assertEquals(Status.Disconnected, withHealth(p, dead, peer).getHostAgentStatus(dead));
+    }
+
+    @Test
+    public void peersThatAreNotUpAreNotAsked() {
+        HostVO dead = host(9, Status.Up, "g9"), peer = host(8, Status.Alert, "g8");
+        ExternalProvisioner p = mock(ExternalProvisioner.class);
+        when(p.getHostHealth("g9", null)).thenReturn("unknown");
+        assertEquals(Status.Disconnected, withHealth(p, dead, peer).getHostAgentStatus(dead));
+        verify(p, never()).getHostHealth("g8", 9L);
+    }
+
+    @Test
+    public void reachableHostIsUpAndUnsupportedHealthKeepsOldBehaviour() {
+        HostVO h = host(9, Status.Up, "g9");
+        ExternalProvisioner p = mock(ExternalProvisioner.class);
+        when(p.getHostHealth("g9", null)).thenReturn("up");
+        assertEquals(Status.Up, withHealth(p, h).getHostAgentStatus(h));
+        when(p.getHostHealth("g9", null)).thenReturn(null);
+        assertEquals(Status.Disconnected, withHealth(p, h).getHostAgentStatus(h));
+    }
+
+    @Test
+    public void externalHostWithoutHealthSupportIsNeverReportedDown() {
         Host host = mock(Host.class);
         when(host.getHypervisorType()).thenReturn(HypervisorType.External);
         assertEquals(Status.Disconnected, investigator.getHostAgentStatus(host));

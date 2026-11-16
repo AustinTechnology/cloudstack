@@ -75,6 +75,21 @@ public interface ExternalProvisioner extends Manager {
 
     Map<String, HostVmStateReportEntry> getHostVmStateReport(long hostId, String extensionName, String extensionRelativePath);
 
+    /** Host health values reported by an extension's "health" action. */
+    String HOST_HEALTH_UP = "up";
+    String HOST_HEALTH_DOWN = "down";
+    String HOST_HEALTH_UNKNOWN = "unknown";
+
+    /**
+     * Asks the extension, through the host with GUID viaHostGuid, whether a host's node is up: the via host itself
+     * when targetHostId is null, otherwise the target host as the via host's cluster sees it. Returns
+     * {@link #HOST_HEALTH_UP}, {@link #HOST_HEALTH_DOWN} or {@link #HOST_HEALTH_UNKNOWN}, or null when the
+     * extension does not declare "hosthealthsupported" (or the host is not known yet).
+     */
+    default String getHostHealth(String viaHostGuid, Long targetHostId) {
+        return null;
+    }
+
     GetExternalConsoleAnswer getInstanceConsole(String hostGuid, String extensionName, String extensionRelativePath, GetExternalConsoleCommand cmd);
 
     RunCustomActionAnswer runCustomAction(String hostGuid, String extensionName, String extensionRelativePath, RunCustomActionCommand cmd);

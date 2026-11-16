@@ -224,4 +224,34 @@ public class ExternalResourceTest {
         assertTrue(answer instanceof UnsupportedAnswer);
         verify(provisioner, never()).runCustomAction(any(), any(), any(), any());
     }
+
+    private void connected(ExternalProvisioner provisioner) {
+        ReflectionTestUtils.setField(externalResource, "extensionName", "ext");
+        ReflectionTestUtils.setField(externalResource, "extensionRelativePath", "ext/ext.py");
+        ReflectionTestUtils.setField(externalResource, "extensionState", Extension.State.Enabled);
+        ReflectionTestUtils.setField(externalResource, "extensionPathReady", true);
+        ReflectionTestUtils.setField(externalResource, "guid", "g1");
+        ReflectionTestUtils.setField(externalResource, "externalProvisioner", provisioner);
+    }
+
+    @Test
+    public void hostHealthDecidesCheckHealthAndReconnection() {
+        ExternalProvisioner provisioner = mock(ExternalProvisioner.class);
+        connected(provisioner);
+        com.cloud.agent.api.CheckHealthCommand check = new com.cloud.agent.api.CheckHealthCommand();
+        when(provisioner.getHostHealth("g1", null)).thenReturn("unknown");
+        assertFalse(externalResource.executeRequest(check).getResult());
+        assertEquals(null, externalResource.initialize());
+        when(provisioner.getHostHealth("g1", null)).thenReturn("up");
+        assertTrue(externalResource.executeRequest(check).getResult());
+        // Without host health support the old behaviour stands.
+        when(provisioner.getHostHealth("g1", null)).thenReturn(null);
+        assertTrue(externalResource.executeRequest(check).getResult());
+    }
+
+    @Test
+    public void externalHostsDoNotClaimPingTests() {
+        connected(mock(ExternalProvisioner.class));
+        assertFalse(externalResource.executeRequest(new com.cloud.agent.api.PingTestCommand("External")).getResult());
+    }
 }

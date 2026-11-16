@@ -787,6 +787,62 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         return vmStates;
     }
 
+    static final String HOST_HEALTH_SUPPORTED = "hosthealthsupported";
+    private static final int HOST_HEALTH_WAIT = 60;
+
+    @Override
+    public String getHostHealth(String viaHostGuid, Long targetHostId) {
+        HostVO via = viaHostGuid == null ? null : hostDao.findByGuid(viaHostGuid);
+        if (via == null || via.getClusterId() == null) {
+            return null;
+        }
+        Map<String, Map<String, String>> accessDetails = extensionsManager.getExternalAccessDetails(via, null);
+        Map<String, String> extension = accessDetails == null ? null : accessDetails.get(ApiConstants.EXTENSION);
+        if (extension == null || !"true".equals(extension.get(HOST_HEALTH_SUPPORTED))) {
+            return null;
+        }
+        Extension ext = extensionHelper.getExtensionForCluster(via.getClusterId());
+        String extensionPath = ext == null ? null : getExtensionCheckedPath(ext.getName(), ext.getRelativePath());
+        if (StringUtils.isEmpty(extensionPath)) {
+            return HOST_HEALTH_UNKNOWN;
+        }
+        Map<String, Object> payload = loadAccessDetails(accessDetails, null);
+        if (targetHostId != null) {
+            HostVO target = hostDao.findById(targetHostId);
+            if (target == null || !via.getClusterId().equals(target.getClusterId())) {
+                return HOST_HEALTH_UNKNOWN;
+            }
+            Map<String, String> targetHost = extensionsManager.getExternalAccessDetails(target, null).get(ApiConstants.HOST);
+            String node = targetHost == null ? null : targetHost.get("node");
+            if (StringUtils.isBlank(node)) {
+                return HOST_HEALTH_UNKNOWN;
+            }
+            Map<String, Object> parameters = new HashMap<>();
+            parameters.put("node", node);
+            payload.put(ApiConstants.PARAMETERS, parameters);
+        }
+        Pair<Boolean, String> result = executeExternalCommand(ext.getName(), "health", payload, HOST_HEALTH_WAIT,
+                String.format("Failed to check the health of host %s", targetHostId == null ? via : targetHostId), extensionPath);
+        return parseHostHealth(result);
+    }
+
+    static String parseHostHealth(Pair<Boolean, String> result) {
+        if (result == null || !result.first() || StringUtils.isBlank(result.second())) {
+            return HOST_HEALTH_UNKNOWN;
+        }
+        try {
+            JsonObject obj = JsonParser.parseString(result.second().trim()).getAsJsonObject();
+            String health = field(obj, "health");
+            if ("success".equals(field(obj, "status"))
+                    && (HOST_HEALTH_UP.equals(health) || HOST_HEALTH_DOWN.equals(health) || HOST_HEALTH_UNKNOWN.equals(health))) {
+                return health;
+            }
+        } catch (RuntimeException e) {
+            // fall through: an unreadable answer says nothing about the node
+        }
+        return HOST_HEALTH_UNKNOWN;
+    }
+
     @Override
     public GetExternalConsoleAnswer getInstanceConsole(String hostName, String extensionName,
                            String extensionRelativePath, GetExternalConsoleCommand cmd) {

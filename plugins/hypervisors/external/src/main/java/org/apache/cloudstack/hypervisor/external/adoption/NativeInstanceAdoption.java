@@ -133,7 +133,8 @@ public class NativeInstanceAdoption {
         access.put(ApiConstants.VIRTUAL_MACHINE, Map.of("proxmox_vmid", Integer.toString(vmid)));
         RunCustomActionCommand cmd = new RunCustomActionCommand(ExtensionsManager.GET_CONFIG_ACTION);
         cmd.setExternalDetails(access);
-        cmd.setWait(60);
+        // As refresh does: a provider read can be slow (two settled reads of a busy host), so use the agent wait.
+        cmd.setWait(AgentManager.Wait.value());
         Answer answer = agentManager.easySend(host.getId(), cmd);
         if (answer == null || !answer.getResult()) {
             // The extension's own error text names the cause, such as a config lock or pending changes.

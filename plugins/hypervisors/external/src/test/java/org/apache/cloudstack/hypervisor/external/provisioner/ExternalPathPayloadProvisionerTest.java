@@ -1530,4 +1530,13 @@ public class ExternalPathPayloadProvisionerTest {
                 new Pair<>(true, "{\"status\":\"success\",\"ip_address\":\"not-an-ip\"}"));
         assertFalse(answer.getResult());
     }
+
+    @Test
+    public void hostHealthAnswerParsing() {
+        assertEquals("up", ExternalPathPayloadProvisioner.parseHostHealth(new Pair<>(true, "{\"status\":\"success\",\"health\":\"up\"}\n")));
+        assertEquals("down", ExternalPathPayloadProvisioner.parseHostHealth(new Pair<>(true, "{\"status\":\"success\",\"health\":\"down\"}")));
+        assertEquals("unknown", ExternalPathPayloadProvisioner.parseHostHealth(new Pair<>(false, "{\"status\":\"success\",\"health\":\"up\"}")));
+        assertEquals("unknown", ExternalPathPayloadProvisioner.parseHostHealth(new Pair<>(true, "{\"status\":\"success\",\"health\":\"maybe\"}")));
+        assertEquals("unknown", ExternalPathPayloadProvisioner.parseHostHealth(new Pair<>(true, "not json")));
+    }
 }

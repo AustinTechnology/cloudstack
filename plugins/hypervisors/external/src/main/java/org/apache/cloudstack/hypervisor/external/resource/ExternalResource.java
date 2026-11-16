@@ -129,6 +129,16 @@ public class ExternalResource implements ServerResource {
 
     @Override
     public StartupCommand[] initialize() {
+        // Do not (re)connect a known host whose node is not up: the host stays Down/Disconnected/Alert instead of
+        // flapping to Up until the next missed ping. New hosts (no GUID match yet) and extensions that do not
+        // declare host health support connect as before.
+        if (!isExtensionDisconnected()) {
+            String health = externalProvisioner.getHostHealth(guid, null);
+            if (health != null && !ExternalProvisioner.HOST_HEALTH_UP.equals(health)) {
+                logger.warn("Not connecting External host {}: its node health is {}", name, health);
+                return null;
+            }
+        }
         final StartupRoutingCommand cmd =
                 new StartupRoutingCommand(CPU, CPU_SPEED, RAM, DOM0_RAM, CAPABILITIES,
                         Hypervisor.HypervisorType.External,Networks.RouterPrivateIpStrategy.HostLocal);
@@ -257,7 +267,9 @@ public class ExternalResource implements ServerResource {
     }
 
     private Answer execute(PingTestCommand cmd) {
-        return new Answer(cmd);
+        // An External host is not a machine CloudStack can ping from; claiming success made the ping investigator
+        // report every unreachable External host as merely "disconnected" (it "pinged" the address "External").
+        return new Answer(cmd, false, "An External host cannot run ping tests");
     }
 
     private Answer execute(ReadyCommand cmd) {
@@ -267,8 +279,11 @@ public class ExternalResource implements ServerResource {
     private Answer execute(CheckHealthCommand cmd) {
         if (isExtensionDisconnected()) {
             logAndGetExtensionNotConnectedOrDisabledError();
+            return new CheckHealthAnswer(cmd, false);
         }
-        return new CheckHealthAnswer(cmd, !isExtensionDisconnected());
+        // Without host health support this only says the extension is connected, as before.
+        String health = externalProvisioner.getHostHealth(guid, null);
+        return new CheckHealthAnswer(cmd, health == null || ExternalProvisioner.HOST_HEALTH_UP.equals(health));
     }
 
     private Answer execute(CheckNetworkCommand cmd) {
