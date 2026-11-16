@@ -12,7 +12,7 @@ the cluster nodes; the extension runs on the management server.
 
 | CloudStack | Hyper-V / WSFC |
 |---|---|
-| External cluster (extension resource map) | One failover cluster. Details: `url` (cluster name or a node, `https://…:5986`), `username`, `password`, `verify_tls_certificate`, `hyperv_cluster` (identity, below) |
+| External cluster (extension resource map) | One failover cluster. Details: `username`, `secret` (the password: a `password` detail is hidden by CloudStack and never passed on), `verify_tls_certificate`, `node_addresses` or `dns_suffix` |
 | External host | One cluster node. Host details `url` (the node), `node` (short node name), `hyperv_cluster` |
 | Instance | A Hyper-V VM, clustered (HA) or not |
 | Pool `external://<storage>` | A Cluster Shared Volume (`C:\ClusterStorage\<name>`) or an SMB share registered in the mapping's `smb_storages` |
@@ -126,4 +126,64 @@ Recorded as findings of the exercise, each worked around without a CloudStack ch
 - Console helper installed on the lab management server and smoke-tested with real Xvfb/x11vnc/xfreerdp3 against an
   unreachable RDP target: one-time password accepted, a wrong one refused, sessions torn down when RDP ends. The RDP
   half (VMConnect to a real node) is untested until the Hyper-V lab exists.
-- **Not yet run against Hyper-V.** Lab: domain controller, two Windows Server 2025 Hyper-V nodes, iSCSI CSVs, nested on HV08.
+- **Live lab (from 16 Nov 2026):** see "Live results" below.
+
+## Live results (nested lab, `hvc01`)
+
+Lab: `hvlab-dc01` (AD `hvlab.lab.guppy.au`, DNS, iSCSI target), `hvlab-hv01`/`hvlab-hv02` (Windows Server 2025
+Datacenter Evaluation Core, Hyper-V nested in KVM on HV08), cluster `hvc01`, CSVs `Volume1` (60 GiB) and `Volume2`
+(120 GiB), virtual switch `vSwitch` on an isolated trunk. Registered in the lab CloudStack (release build
+`6fb6c184bc`, unchanged) as extension "Hyper-V Failover Cluster", cluster `hvc01`, hosts `hvlab-hv01`/`hvlab-hv02`,
+pools `ext-Volume1`/`ext-Volume2`. Test guests: `hvtest01` (Gen 1, not clustered) and `hvtest02` (Gen 2, clustered),
+Alpine with no Hyper-V integration services.
+
+### Defects found and fixed
+
+| Finding | Fix |
+|---|---|
+| CloudStack hides a `password` detail and `getExternalAccessDetails` passes on only displayed details, so the mapping password never reached the extension | The mapping carries it as `secret` |
+| `Move-VMStorage -VHDs` rejected the hashtable: `Join-Path` returns a PSObject-wrapped string, which fails the cmdlet's key check ("must contain 'SourceFilePath'") | Plain `[string]` values. The failed move had sent no change, but the extension cannot tell an exception from a partial move, so it rightly reported an unknown outcome and the lease stayed until released |
+| On a running VM Hyper-V reports a DVD eject only after the guest releases the disc (~4 s); the extension read back too early and reported an unknown outcome | `detach` waits up to 60 s for the drive to show empty |
+| Hyper-V **dynamic MAC addresses change** when a VM is started on another node (`hvtest02` came back from a stop/start on `hvlab-hv02` with a new MAC). CloudStack knows a NIC by its MAC; refresh then offered to import the "new" NIC and left the recorded one report-only | `start` makes every dynamic adapter address static (its present value) before a CloudStack start. Adopted guests started only outside CloudStack can still drift: make their MACs static before adoption |
+| Each PowerShell run pays the module load (~1.5 s WinRM + PowerShell, ~2 s Hyper-V, ~4 s FailoverClusters) | Cluster, storage and the host node's inventory are read in one run (`overview`) |
+| Graceful stop with `Stop-VM -AsJob` intermittently ended the whole PowerShell process (exit 2, no output) while the guest shut down; the VM was off but CloudStack saw an unknown outcome (seen twice in a row, reproduced directly) | Guest shutdown through `Msvm_ShutdownComponent.InitiateShutdown` and a poll, as reboot already did; 3/3 direct and the CloudStack cycles below then passed |
+| Console helper: the management server (user `cloud`) could not reach the socket (runtime directory 0750) | Directory 0751; the socket stays 0660 `hvconsole:cloud` |
+| Console helper: FreeRDP asked for user, domain and password on stdin read none of them; with them given, VMConnect never finished activation | `/u:` and `/d:` on the command line (not secret), only the password on stdin; `/sec:nla -gfx` |
+
+### Confirmed through CloudStack
+
+- Host registration, status batches every minute, `listExternalInstances` (`hastate` from the cluster role).
+- Pool registration: CSV backing `csv/@hvc01/<name>`, mapped only to `hvc01` (the Proxmox clusters are not).
+- `adoptExternalInstance` dry run and apply of a running Gen 1 and a running clustered Gen 2 guest: no restart, root
+  VHDX imported as a volume on the right pool and offering.
+- Refresh dry run: no drift (and the MAC drift above, before the fix).
+- Stop, stopped scale (1/512 → 2/1024), start. Start ejected the provider-only ISO, as stock CloudStack-start media
+  semantics require.
+- Reboot of a guest without integration services refused before any write (exit 90), as designed. With them (Alpine
+  on `hvnew-uefi`): guest restart through the shutdown component, heartbeat seen dropping and returning, no reset.
+- After the stop fix: five start/stop cycles and a reboot through CloudStack, all successful, no leases left.
+- Gen 2 running: NIC hot-add and remove; data disk add (SCSI hot-add), grow, live move CSV1 → CSV2
+  (`Move-VMStorage`), delete; no restart.
+- Gen 1 running: ISO attach (copied once from secondary storage to `Volume2\iso\cloudstack-<uuid>.iso`, checksum
+  verified) and detach, repeated; attach refused when the only drive holds a provider disc.
+- Instance Snapshot with memory: create, revert (restarts the VM, as on Proxmox), delete. Disk-only on a running guest
+  without integration services: Hyper-V refuses a Production checkpoint; the extension forces `ProductionOnly` rather
+  than silently taking a crash-consistent Standard one, and reports a known failure.
+- HA: `updateVirtualMachine haenable` on an HA offering adds and removes the cluster role while running (uptime
+  continuous); an offering without HA is refused by stock CloudStack.
+- Out-of-band live migration (`Move-ClusterVirtualMachineRole`): CloudStack showed the new host within ~15 s; later
+  actions went to the new owner node.
+- Deployment from a CloudStack ISO: BIOS → Gen 1 (IDE), UEFI legacy → Gen 2 with Secure Boot off and the ISO first in
+  the boot order; VMID marker in Notes, CloudStack's static MACs, root volume bound on the chosen pool; the UEFI
+  guest booted Alpine to a login prompt (seen on the console).
+- Expunge of an adopted and of a CloudStack-created guest: VM and its folder removed from the CSV.
+- Console: `createConsoleEndpoint` → console proxy → helper → VMConnect: authenticated WebSocket with an RFB banner;
+  a frame read from the helper directly showed the guest's real screen. The session ends when the VNC client leaves.
+- Cluster-role changes over plain NTLM with the mapping account; no CredSSP or delegation needed.
+
+### Not yet tested live
+
+KVP addresses and Production checkpoints of an integration-services guest, Secure Boot +
+vTPM, Windows guests, template deployment, node failure/failover, two management
+servers, and anything at production speed: `getconfig` takes ~30 s on this nested lab and a refresh (four
+`getconfig`s) ~2 min.

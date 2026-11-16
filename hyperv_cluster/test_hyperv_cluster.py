@@ -115,6 +115,9 @@ class FakeCluster:
     def s_storage(self, node, args):
         return self.storages
 
+    def s_overview(self, node, args):
+        return {"cluster": self.s_cluster(node, args), "storage": self.s_storage(node, args), "inventory": self.s_inventory(node, args)}
+
     def s_isofind(self, node, args):
         want = self.path(args, args["volume"])
         return [{"guid": vm["guid"], "name": vm["name"], "slots": ["SCSI0:1"]} for vm in self.vms.values()
@@ -308,7 +311,7 @@ CLUSTER = "hvc01"
 def payload(vm=None, vmid=None, params=None, adopted=None, host=None, **top):
     p = {"externaldetails": {
         "extension": {"iso_storage": "Volume1"},
-        "resourcemap": {"username": "LAB\\svc-cloudstack", "password": "pw", "dns_suffix": "lab.test"},
+        "resourcemap": {"username": "LAB\\svc-cloudstack", "secret": "pw", "dns_suffix": "lab.test"},
         "host": dict({"url": "hv01.lab.test", "node": "hv01", "proxmox_cluster": CLUSTER, "network_bridge": "vSwitch",
                       "native_adoption_status": "false", "native_adoption_lifecycle": "true"}, **(host or {})),
         "virtualmachine": {}}}

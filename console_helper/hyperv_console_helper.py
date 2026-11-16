@@ -133,14 +133,19 @@ class Helper:
             domain = request.get("domain") or ""
             if "\\" in user and not domain:
                 domain, user = user.split("\\", 1)
+            if not all(ch.isalnum() or ch in "._-@ " for ch in user + domain):
+                raise ValueError("Invalid user or domain")
+            # User and domain are not secret and go on the command line; FreeRDP then asks only for the password on
+            # stdin (asked for all three, it read none of them). VMConnect never finishes activation with the
+            # graphics pipeline on (FreeRDP 3.32 against Windows Server 2025), hence -gfx.
             rdp = self.launch([self.c["xfreerdp"], "/v:%s:%d" % (node, self.c["rdp_port"]), "/vmconnect:" + vm,
-                               "/from-stdin:force", "/cert:" + self.c["rdp_certificate"], "/f", "-decorations",
+                               "/u:" + user, "/d:" + domain, "/from-stdin:force", "/sec:nla", "-gfx",
+                               "/cert:" + self.c["rdp_certificate"], "/f", "-decorations",
                                "/size:%dx%d" % (self.c["width"], self.c["height"]), "/log-level:ERROR"],
                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
             session.procs.append(rdp)
-            # /from-stdin asks for user, domain and password in that order.
             assert rdp.stdin is not None
-            rdp.stdin.write(("%s\n%s\n%s\n" % (user, domain, request["password"])).encode())
+            rdp.stdin.write(("%s\n" % request["password"]).encode())
             rdp.stdin.close()
             fd, pwfile = tempfile.mkstemp(prefix="vncpw-")
             with os.fdopen(fd, "w") as f:

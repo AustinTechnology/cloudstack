@@ -268,6 +268,11 @@ $deadline = [int]$A.seconds
 switch ($A.op) {
   'start' {
     if ([string]$v.State -eq 'Running') { break }
+    # A dynamic MAC address can change when the VM starts on another node, and CloudStack knows a NIC by its MAC:
+    # make every adapter's present address static before the first start through CloudStack.
+    foreach ($n in @(Get-VMNetworkAdapter -VM $v | Where-Object { $_.DynamicMacAddressEnabled })) {
+      if ($n.MacAddress -and $n.MacAddress -ne '000000000000') { Set-VMNetworkAdapter -VMNetworkAdapter $n -StaticMacAddress $n.MacAddress }
+    }
     $g = GroupOf $v
     if ($g) { Start-ClusterGroup -InputObject $g -Wait $deadline | Out-Null } else { Start-VM -VM $v }
     $v = WaitState $v 'Running' $deadline
@@ -276,10 +281,14 @@ switch ($A.op) {
     if ([string]$v.State -eq 'Off') { break }
     $shut = Get-VMIntegrationService -VM $v | Where-Object { $_.Name -eq 'Shutdown' -and $_.Enabled -and [string]$_.PrimaryStatusDescription -eq 'OK' }
     if ($shut -and -not $A.force) {
-      $job = Stop-VM -VM $v -Force -AsJob
-      $grace = [Math]::Max(10, $deadline - 40)
-      try { $v = WaitState $v 'Off' $grace } catch { }
-      Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+      # Ask the guest through the shutdown component and poll, as reboot does. (Stop-VM -AsJob intermittently took
+      # the whole PowerShell process down with exit code 2 and no output while the guest shut down.)
+      $sc = Get-CimInstance -Namespace root\virtualization\v2 -ClassName Msvm_ShutdownComponent -Filter ("SystemName='" + $v.Id + "'")
+      if ($sc) {
+        $null = Invoke-CimMethod -InputObject $sc -MethodName InitiateShutdown -Arguments @{ Force = $true; Reason = 'CloudStack stop' }
+        $grace = [Math]::Max(10, $deadline - 40)
+        try { $v = WaitState $v 'Off' $grace } catch { }
+      }
     }
     if ([string](Get-VM -Id $v.Id).State -ne 'Off') { Stop-VM -VM $v -TurnOff -Force }
     $v = WaitState $v 'Off' 60
@@ -382,7 +391,8 @@ switch ($A.op) {
     } elseif ($A.op -eq 'move') {
       $dest = FullPath $A.target
       if (Test-Path -LiteralPath $dest) { Unchanged 'The destination file already exists' }
-      Move-VMStorage -VM $v -VHDs @(@{ SourceFilePath = $path; DestinationFilePath = $dest })
+      # The values must be plain strings: Join-Path's PSObject-wrapped strings fail Move-VMStorage's key check.
+      Move-VMStorage -VM $v -VHDs @(@{ 'SourceFilePath' = [string]$path; 'DestinationFilePath' = [string]$dest })
     }
   }
 }
@@ -406,6 +416,9 @@ switch ($A.op) {
   'detach' {
     $path = FullPath $A.volume
     foreach ($d in $drives) { if ($d.Path -eq $path) { Set-VMDvdDrive -VMDvdDrive $d -Path $null } }
+    # On a running VM Hyper-V reports the eject only after the guest lets the disc go (seconds).
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline -and (Get-VMDvdDrive -VM $v | Where-Object { $_.Path -eq $path })) { Start-Sleep -Seconds 1 }
   }
   'sync' {
     if ([string]$v.State -ne 'Off') { return Describe $v }
@@ -490,7 +503,11 @@ switch ($A.op) {
 Describe (Get-VM -Id $v.Id)
 """,
 }
-READ_ONLY_SCRIPTS = {"cluster", "inventory", "describe", "storage", "isofind", "isostat"}
+# Every PowerShell run pays for loading the Hyper-V and FailoverClusters modules (seconds each on a busy node), so the
+# cluster, its storages and the first node's VMs are read in one run.
+SCRIPTS["overview"] = "[pscustomobject]@{ cluster = & { %s }; storage = @(& { %s }); inventory = & { %s } }" % (
+    SCRIPTS["cluster"], SCRIPTS["storage"], SCRIPTS["inventory"])
+READ_ONLY_SCRIPTS = {"cluster", "inventory", "describe", "storage", "isofind", "isostat", "overview"}
 
 
 class WinRMTransport:
@@ -537,7 +554,11 @@ class WinRMTransport:
         try:
             return json.loads(text.splitlines()[-1])
         except (ValueError, IndexError):
-            raise Fail("Unreadable answer from node %s (exit %s)" % (node, code), known=script in READ_ONLY_SCRIPTS)
+            # PowerShell's own errors arrive as CLIXML on stderr; name the first one so the failure can be diagnosed.
+            errors = re.findall(r'<S S="Error">(.*?)</S>', err.decode("utf-8", "replace"))
+            detail = re.sub(r"_x000D__x000A_|\s+", " ", " ".join(errors)).strip()[:300]
+            raise Fail("Unreadable answer from node %s (exit %s)%s" % (node, code, ": " + detail if detail else ""),
+                       known=script in READ_ONLY_SCRIPTS)
 
 
 def console_request(path, request, timeout):
@@ -593,6 +614,8 @@ class Extension:
         self.transport = transport or WinRMTransport(self.settings)
         self._cluster = None
         self._inventory = None
+        self._storage = []
+        self._local_inventory = {}
 
     # ---- configuration ------------------------------------------------------------------------------
     def setting(self, key, default=""):
@@ -604,7 +627,9 @@ class Extension:
 
     def load_settings(self):
         username = self.rmap.get("username") or self.ext.get("username") or ""
-        password = self.rmap.get("password") or self.ext.get("password") or ""
+        # CloudStack stores "password" details as hidden and never passes hidden details to the extension, so the
+        # mapping carries the password as "secret" (as the Proxmox extension's token does).
+        password = self.rmap.get("secret") or self.rmap.get("password") or self.ext.get("password") or ""
         cluster = self.host.get("proxmox_cluster") or ""
         alias = self.host.get("hyperv_cluster") or ""
         if alias and cluster and alias != cluster:
@@ -701,7 +726,10 @@ class Extension:
         if self._cluster is None:
             if not self.settings["node"]:
                 raise Fail("The host has no node detail")
-            info = self.call(self.settings["node"], "cluster")
+            both = self.call(self.settings["node"], "overview", {"smb": self.settings["smb"]})
+            info = both["cluster"]
+            self._storage = as_list(both.get("storage"))
+            self._local_inventory = both["inventory"]
             name = str(info.get("cluster") or "").lower()
             if not self.settings["cluster"] or name != self.settings["cluster"]:
                 raise Fail("The host's cluster identity does not match the failover cluster %s" % name)
@@ -717,8 +745,12 @@ class Extension:
             down = [n["name"] for n in self.cluster()["nodes"] if n.get("state") not in ("Up", "Paused")]
             if require_all and down:
                 raise Fail("Cluster node(s) %s are not up; the inventory would be incomplete" % ", ".join(sorted(down)))
-            with ThreadPoolExecutor(max_workers=max(1, min(8, len(nodes)))) as pool:
-                results = list(pool.map(lambda n: (n, self.call(n, "inventory", timeout=60)), nodes))
+            local = self.settings["node"]
+            others = [n for n in nodes if n.lower() != local]
+            with ThreadPoolExecutor(max_workers=max(1, min(8, len(others)))) as pool:
+                results = list(pool.map(lambda n: (n, self.call(n, "inventory", timeout=60)), others))
+            if any(n.lower() == local for n in nodes):
+                results.insert(0, (local, self._local_inventory))
             vms, seen = [], {}
             for node, result in results:
                 for vm in as_list(result.get("vms")):
@@ -825,7 +857,8 @@ class Extension:
     # ---- shared views -------------------------------------------------------------------------------
     def storage_root_map(self):
         """name -> root path for every storage of the cluster, read from the cluster."""
-        rows = as_list(self.call(self.settings["node"], "storage", {"smb": self.settings["smb"]}))
+        self.cluster()
+        rows = self._storage
         return {r["storage"]: r for r in rows if STORAGE_RE.match(str(r.get("storage") or ""))}
 
     def volume_of(self, path, roots):
@@ -1135,7 +1168,7 @@ class Extension:
     def do_statuses(self):
         node = self.settings["node"]
         self.cluster()
-        vms = [vm for vm in as_list(self.call(node, "inventory").get("vms"))]
+        vms = [vm for vm in as_list(self._local_inventory.get("vms"))]
         for vm in vms:
             vm["guid"] = vm["guid"].lower()
             vm["vmid"] = vmid_of(vm["guid"], vm.get("notes"))

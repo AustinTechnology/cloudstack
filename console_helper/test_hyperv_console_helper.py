@@ -73,7 +73,10 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(xvfb.args[0], "Xvfb")
         self.assertIn("/v:hv01.lab.test:2179", rdp.args)
         self.assertIn("/vmconnect:5d1c7e0a-9a52-4f7e-8d5b-2b1f6c0f9a11", rdp.args)
-        self.assertEqual(rdp.written, b"svc-cloudstack\nLAB\nS3cret-pw\n")
+        self.assertIn("/u:svc-cloudstack", rdp.args)
+        self.assertIn("/d:LAB", rdp.args)
+        self.assertIn("-gfx", rdp.args)
+        self.assertEqual(rdp.written, b"S3cret-pw\n")
         self.assertIn("-once", vnc.args)
         self.assertIn("127.0.0.1", vnc.args)
         for p in self.launch.procs:  # no secret on any command line

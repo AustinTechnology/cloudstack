@@ -5,12 +5,13 @@ Failover Clusters. It targets the native External work on the AustinTechnology C
 `step7-native-sync`): native discovery/refresh/adoption, NIC and CPU/RAM changes, disks as volumes, ISO and Instance
 Snapshots. See `docs/DESIGN.md` for the mapping and `docs/EXTERNAL-EXTENSION-CONTRACT.md` for the wire contract.
 
-**Status: built and offline-tested, not yet run against Hyper-V.**
+**Status: running against a nested two-node Hyper-V failover-cluster lab; see `docs/DESIGN.md` "Live results" for what is proven and what is not.**
 
 ## Requirements
 
 - Management server: Python 3 with `pywinrm` (`apt install python3-winrm`).
-- Every cluster node: WinRM over HTTPS (5986), Hyper-V and FailoverClusters PowerShell modules.
+- Every cluster node: WinRM over HTTPS (5986), Hyper-V and FailoverClusters PowerShell modules, and TCP 2179 (VMConnect) from the management servers for the console.
+- Existing VMs: give their network adapters static MAC addresses before adoption (a dynamic MAC can change when the VM starts on another node; CloudStack starts pin it).
 - One domain account per cluster mapping, member of Hyper-V Administrators on each node and with full control of the
   cluster (`Grant-ClusterAccess -Full`), and write access to the CSV folders it uses.
 
@@ -20,7 +21,7 @@ Extension (or cluster mapping) details:
 
 | Detail | Meaning |
 |---|---|
-| `username`, `password` | Domain account (cluster mapping) |
+| `username`, `secret` | Domain account and its password (cluster mapping). Not `password`: CloudStack hides that key and never passes it to the extension |
 | `winrm_transport` | `ntlm` (default) or `kerberos` |
 | `verify_tls_certificate`, `ca_file` | WinRM TLS checking (default verify) |
 | `dns_suffix` or `node_addresses` | How to reach a node by name (`{"hv01":"10.0.0.11"}`) |

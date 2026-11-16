@@ -7,7 +7,8 @@ User=hvconsole
 Group=hvconsole
 SupplementaryGroups=cloud
 RuntimeDirectory=hyperv-console
-RuntimeDirectoryMode=0750
+# The management server (user cloud) must reach the socket; the socket itself is 0660 hvconsole:cloud.
+RuntimeDirectoryMode=0751
 StateDirectory=hyperv-console
 Environment=HOME=/var/lib/hyperv-console
 ExecStart=/usr/bin/python3 /usr/local/lib/hyperv-console/hyperv_console_helper.py --config /etc/hyperv-console-helper.json
