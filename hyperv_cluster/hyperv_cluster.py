@@ -166,8 +166,16 @@ $v = TheVM; $a = Describe $v; $b = Describe (Get-VM -Id $v.Id)
 """,
     "hoststats": r"""
 $os = Get-CimInstance Win32_OperatingSystem
-$cpu = Get-CimInstance Win32_PerfFormattedData_HvStats_HyperVHypervisorLogicalProcessor | Where-Object { $_.Name -eq '_Total' }
-if (@($cpu).Count -ne 1) { Unchanged 'Hyper-V total CPU counter unavailable' }
+# Formatted counters read once by a fresh WMI client are not a utilisation (often 0 or 100); take two raw samples
+# of every logical processor a few seconds apart: % = run-time delta / (elapsed * processors).
+$lp = { @(Get-CimInstance Win32_PerfRawData_HvStats_HyperVHypervisorLogicalProcessor | Where-Object { $_.Name -ne '_Total' }) }
+# The first perf query starts the WMI perf provider (CPU-heavy on a small host): warm it up, then measure 3 s.
+$null = & $lp; Start-Sleep -Seconds 1; $a = & $lp; Start-Sleep -Seconds 3; $b = & $lp
+if ($a.Count -eq 0 -or $a.Count -ne $b.Count) { Unchanged 'Hyper-V logical processor counters unavailable' }
+$run = 0.0; foreach ($x in $b) { $y = $a | Where-Object Name -eq $x.Name; $run += [double]$x.PercentTotalRunTime - [double]$y.PercentTotalRunTime }
+$elapsed = [double]$b[0].Timestamp_Sys100NS - [double]$a[0].Timestamp_Sys100NS
+if ($elapsed -le 0) { Unchanged 'Hyper-V logical processor counters did not advance' }
+$cpu = [pscustomobject]@{ PercentTotalRunTime = [Math]::Max(0, [Math]::Min(100, 100 * $run / ($elapsed * $b.Count))) }
 $cpus = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
 $rx = $null; $tx = $null
 try {
