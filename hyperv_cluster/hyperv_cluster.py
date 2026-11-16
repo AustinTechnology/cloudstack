@@ -151,6 +151,10 @@ $c = Get-Cluster
     [pscustomobject]@{ guid = [string](Get-ClusterParameter -InputObject $_ -Name VmID).Value; group = [string]$_.OwnerGroup.Name
       state = [string]$_.OwnerGroup.State; owner = [string]$_.OwnerNode.Name } }) }
 """,
+    "nodes": r"""
+[pscustomobject]@{ cluster = [string](Get-Cluster).Name; local = [string]$env:COMPUTERNAME
+  nodes = @(Get-ClusterNode | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; state = [string]$_.State } }) }
+""",
     "inventory": r"""
 [pscustomobject]@{ node = [string]$env:COMPUTERNAME; vms = @(Get-VM | ForEach-Object {
   [pscustomobject]@{ guid = [string]$_.Id; name = [string]$_.Name; state = [string]$_.State; notes = [string]$_.Notes
@@ -507,7 +511,7 @@ Describe (Get-VM -Id $v.Id)
 # cluster, its storages and the first node's VMs are read in one run.
 SCRIPTS["overview"] = "[pscustomobject]@{ cluster = & { %s }; storage = @(& { %s }); inventory = & { %s } }" % (
     SCRIPTS["cluster"], SCRIPTS["storage"], SCRIPTS["inventory"])
-READ_ONLY_SCRIPTS = {"cluster", "inventory", "describe", "storage", "isofind", "isostat", "overview"}
+READ_ONLY_SCRIPTS = {"cluster", "nodes", "inventory", "describe", "storage", "isofind", "isostat", "overview"}
 
 
 class WinRMTransport:
@@ -1202,6 +1206,31 @@ class Extension:
         for key, value in rows:
             power[key] = "unknown" if key in power else value
         return {"status": "success", "power_state": power}
+
+    def do_health(self):
+        """Is a node up? Without a "node" parameter: can this host's own node be reached, and is it an up member of
+        the expected cluster. With one: how this host's node sees that other node's cluster membership, so
+        CloudStack can tell a node that is down from one it merely cannot reach. Never fails for a dead node; it
+        answers "unknown" instead."""
+        own = self.settings["node"]
+        if not own:
+            raise Fail("The host has no node detail")
+        target = str(self.params.get("node") or own).lower()
+        try:
+            view = self.call(own, "nodes", {"roots": {}}, timeout=20)
+        except Fail as e:
+            return {"status": "success", "health": "unknown", "node": target, "reason": str(e)[:200]}
+        if str(view.get("cluster") or "").lower() != self.settings["cluster"]:
+            raise Fail("The host's cluster identity does not match the failover cluster")
+        states = {str(n.get("name") or "").lower(): str(n.get("state") or "") for n in as_list(view.get("nodes"))}
+        if target not in states:
+            raise Fail("Node %s is not a member of the cluster" % target)
+        state = states[target]
+        if target == own:
+            health = "up" if state in ("Up", "Paused") else "unknown"
+        else:
+            health = {"Up": "up", "Paused": "up", "Down": "down"}.get(state, "unknown")
+        return {"status": "success", "health": health, "node": target, "state": state}
 
     def do_getconsole(self):
         """The VM's console as VNC, through the console helper (VMConnect RDP on the node, served as VNC)."""

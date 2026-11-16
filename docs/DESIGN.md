@@ -192,6 +192,21 @@ Alpine with no Hyper-V integration services.
   a frame read from the helper directly showed the guest's real screen. The session ends when the VNC client leaves.
 - Cluster-role changes over plain NTLM with the mapping account; no CredSSP or delegation needed.
 
+### Host state (CloudStack side, lab build `hosthealth-b`)
+
+Before: a hard-off node stayed `Up` in CloudStack indefinitely. The status batch failed every minute, the ping timeout
+investigation sent `CheckHealthCommand`, and `ExternalResource` answered it "healthy" whenever the extension was merely
+configured; the ping investigator then "pinged" the host address `External` successfully. Now (`health` action, gated by
+`hosthealthsupported=true`):
+
+- Hard power-off of hv02: CloudStack `Up` → `Down` ~2 min later (ping timeout + investigation; hv01 confirmed hv02
+  `Down` in the cluster). No CloudStack HA work queued; the cluster's own role failover is unaffected.
+- While the node is off (or quarantined by WSFC after repeated hard stops) every reconnect attempt is refused
+  (`Not connecting External host ...: its node health is unknown`), so the host stays `Down` instead of flapping.
+- Node back and an up cluster member: CloudStack `Up` within ~90 s (next direct-agent scan).
+- Without a confirming peer the host goes `Alert` instead of `Down` (seen in build `hosthealth-a`, before the ping-test
+  fix).
+
 ### Not yet tested live
 
 KVP addresses and Production checkpoints of an integration-services guest, Secure Boot +

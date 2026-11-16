@@ -45,6 +45,7 @@ class FakeCluster:
         self.vms = {}
         self.files = {}  # full path -> size
         self.calls = []
+        self.unreachable = set()
         self.lose = set()  # scripts whose answer is lost after they ran
         self.fail = {}  # script -> error raised after running (unknown) unless Unchanged
         self.storages = [{"storage": "Volume1", "kind": "csv", "root": "C:\\ClusterStorage\\Volume1", "state": "Online", "total": 10 * GIB * 100, "used": GIB},
@@ -103,6 +104,11 @@ class FakeCluster:
         return {"cluster": self.name, "nodes": self.nodes,
                 "groups": [{"guid": vm["guid"], "group": vm["name"], "state": "Online" if vm["state"] == "Running" else "Offline", "owner": vm["node"]}
                            for vm in self.vms.values() if vm["clustered"]]}
+
+    def s_nodes(self, node, args):
+        if node in self.unreachable:
+            raise ConnectionError("no route")
+        return {"cluster": self.name, "local": node.upper(), "nodes": self.nodes}
 
     def s_inventory(self, node, args):
         return {"node": node.upper(), "vms": [{k: vm[k] for k in ("guid", "name", "state", "notes", "clustered", "ops")}
@@ -442,6 +448,34 @@ class IdentityAndInventory(Base):
     def test_a_down_node_fails_discovery(self):
         self.c.nodes[1]["state"] = "Down"
         rc, out = self.run_action("discover", payload())
+        self.assertEqual(rc, 90)
+
+    def test_health_own_node_up(self):
+        rc, out = self.run_action("health", payload())
+        self.assertEqual((rc, out["health"]), (0, "up"))
+        self.assertEqual(self.writes(), [])
+
+    def test_health_own_node_unreachable_is_unknown_not_failure(self):
+        self.c.unreachable.add("hv01")
+        rc, out = self.run_action("health", payload())
+        self.assertEqual((rc, out["health"]), (0, "unknown"))
+
+    def test_health_peer_reports_down_node(self):
+        self.c.nodes[1]["state"] = "Down"
+        rc, out = self.run_action("health", payload(params={"node": "HV02"}))
+        self.assertEqual((rc, out["health"], out["node"]), (0, "down", "hv02"))
+
+    def test_health_peer_reports_up_and_joining(self):
+        rc, out = self.run_action("health", payload(params={"node": "hv02"}))
+        self.assertEqual(out["health"], "up")
+        self.c.nodes[1]["state"] = "Joining"
+        rc, out = self.run_action("health", payload(params={"node": "hv02"}))
+        self.assertEqual(out["health"], "unknown")
+
+    def test_health_refuses_wrong_cluster_and_unknown_node(self):
+        rc, out = self.run_action("health", payload(host={"proxmox_cluster": "other"}))
+        self.assertEqual(rc, 90)
+        rc, out = self.run_action("health", payload(params={"node": "hv09"}))
         self.assertEqual(rc, 90)
 
     def test_missing_credentials(self):
