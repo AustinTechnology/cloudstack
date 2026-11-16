@@ -147,6 +147,8 @@ Alpine with no Hyper-V integration services.
 | Hyper-V **dynamic MAC addresses change** when a VM is started on another node (`hvtest02` came back from a stop/start on `hvlab-hv02` with a new MAC). CloudStack knows a NIC by its MAC; refresh then offered to import the "new" NIC and left the recorded one report-only | `start` makes every dynamic adapter address static (its present value) before a CloudStack start. Adopted guests started only outside CloudStack can still drift: make their MACs static before adoption |
 | Each PowerShell run pays the module load (~1.5 s WinRM + PowerShell, ~2 s Hyper-V, ~4 s FailoverClusters) | Cluster, storage and the host node's inventory are read in one run (`overview`) |
 | Graceful stop with `Stop-VM -AsJob` intermittently ended the whole PowerShell process (exit 2, no output) while the guest shut down; the VM was off but CloudStack saw an unknown outcome (seen twice in a row, reproduced directly) | Guest shutdown through `Msvm_ShutdownComponent.InitiateShutdown` and a poll, as reboot already did; 3/3 direct and the CloudStack cycles below then passed |
+| `prepare`/`create` refused every deployment while any node was down ("inventory would be incomplete") | They check VMID uniqueness against the nodes that are up: a random 31-bit VMID meeting one of a down node's VMs is very unlikely, and duplicates are refused once the node returns |
+| A template deployment ignored the root disk size asked for (`rootdisksize`); the disk got the template's `disk_size_gb` | The larger of the two. The Proxmox extension has the same gap (it reads only `disk_size_gb`) |
 | Console helper: the management server (user `cloud`) could not reach the socket (runtime directory 0750) | Directory 0751; the socket stays 0660 `hvconsole:cloud` |
 | Console helper: FreeRDP asked for user, domain and password on stdin read none of them; with them given, VMConnect never finished activation | `/u:` and `/d:` on the command line (not secret), only the password on stdin; `/sec:nla -gfx` |
 
@@ -176,6 +178,15 @@ Alpine with no Hyper-V integration services.
 - Deployment from a CloudStack ISO: BIOS → Gen 1 (IDE), UEFI legacy → Gen 2 with Secure Boot off and the ISO first in
   the boot order; VMID marker in Notes, CloudStack's static MACs, root volume bound on the chosen pool; the UEFI
   guest booted Alpine to a login prompt (seen on the console).
+- Template deployment (Alpine cloud image converted to VHDX on `Volume2\templates`, template details
+  `template_volume`, `generation=2`, `disk_size_gb`): full copy to the chosen pool, root grown to the asked size,
+  booted (seen on the console); deployed while `hvlab-hv02` was powered off.
+- Node failure: `hvlab-hv02` hard powered off with clustered `hvtest02` running on it. The cluster restarted the guest
+  on `hvlab-hv01` after ~4 min (WSFC's default 240 s resiliency period), CloudStack showed it there within ~30 s, its
+  (static) MAC unchanged, no CloudStack HA work queued, no leases. When the node came back it rejoined and status
+  batches resumed. **CloudStack kept `hvlab-hv02` Up/Enabled for the whole 15 minutes it was off**: the status
+  batch failed every minute (logged as a failed ping task) but nothing changed the host's state. That is the stock
+  External host path, the same for Proxmox hosts, not this extension.
 - Expunge of an adopted and of a CloudStack-created guest: VM and its folder removed from the CSV.
 - Console: `createConsoleEndpoint` → console proxy → helper → VMConnect: authenticated WebSocket with an RFB banner;
   a frame read from the helper directly showed the guest's real screen. The session ends when the VNC client leaves.
@@ -184,6 +195,6 @@ Alpine with no Hyper-V integration services.
 ### Not yet tested live
 
 KVP addresses and Production checkpoints of an integration-services guest, Secure Boot +
-vTPM, Windows guests, template deployment, node failure/failover, two management
+vTPM, Windows guests, two management
 servers, and anything at production speed: `getconfig` takes ~30 s on this nested lab and a refresh (four
 `getconfig`s) ~2 min.

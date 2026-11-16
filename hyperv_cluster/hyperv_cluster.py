@@ -999,7 +999,9 @@ class Extension:
     def do_prepare(self):
         if self.is_adoption():
             raise Fail("Instances are adopted with adoptExternalInstance; this extension has no other adoption")
-        taken = {vm["vmid"] for vm in self.inventory()}
+        # A node that is down cannot be read, but deployments must not stop for it: a random 31-bit VMID is very
+        # unlikely to meet one of its VMs, and if it ever does both are refused as duplicates once the node is back.
+        taken = {vm["vmid"] for vm in self.inventory(require_all=False)}
         for _ in range(64):
             candidate = secrets.randbelow(VMID_LIMIT) + 1
             if candidate not in taken:
@@ -1038,7 +1040,7 @@ class Extension:
         vmid, name = self.vmid(), self.instance_name()
         if not name or not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$", name):
             raise Fail("Invalid instance name")
-        if any(vm["vmid"] == vmid for vm in self.inventory()):
+        if any(vm["vmid"] == vmid for vm in self.inventory(require_all=False)):
             raise Fail("VMID %d is already used in the cluster" % vmid)
         if not self.settings["switch"]:
             raise Fail("The host has no network_bridge (virtual switch) detail")
@@ -1061,7 +1063,9 @@ class Extension:
                 raise Fail("The template has no template_volume detail")
             generation = int(self.vmd.get("generation") or 2)
             firmware = "uefi-secure" if str(self.vmd.get("secure_boot", "")).lower() == "true" else ("uefi" if generation == 2 else "bios")
-            size = int(self.vmd.get("disk_size_gb") or 0) * GIB
+            # The template's disk_size_gb is its minimum; a root disk size asked for at deployment (rootdisksize) grows it.
+            asked = str(self.to_details.get("rootdisksize") or "")
+            size = max(int(self.vmd.get("disk_size_gb") or 0), int(asked) if asked.isdigit() else 0) * GIB
         if firmware == "uefi-secure" and self.setting("hyperv_shared_guardian") != "true":
             raise Fail("Secure Boot with a TPM needs a guardian shared by the cluster's nodes; set hyperv_shared_guardian=true once it is")
         os_type = self.vmd.get("iso_os_type") or ""
