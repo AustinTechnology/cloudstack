@@ -114,6 +114,17 @@ class FakeCluster:
         return {"node": node.upper(), "vms": [{k: vm[k] for k in ("guid", "name", "state", "notes", "clustered", "ops")}
                                               for vm in self.vms.values() if vm["node"].lower() == node]}
 
+    def s_hoststats(self, node, args):
+        return {"node": node.upper(), "cpu_utilization": 25, "cpus": 4, "total_memory_kb": 10000,
+                "free_memory_kb": 5000, "network_rx_bytes": 100, "network_tx_bytes": 200, "load_average": None}
+
+    def s_vmstats(self, node, args):
+        return {"node": node.upper(), "vms": [dict(guid=v["guid"], name=v["name"], notes=v["notes"],
+                cpus=v["cpus"], cpu_utilization=12, memory_kb=v["memory"] // 1024, memory_free_kb=None,
+                memory_target_kb=None, network_rx_bytes=123, network_tx_bytes=456, disk_read_bytes=None,
+                disk_write_bytes=None, disk_read_ios=None, disk_write_ios=None)
+                for v in self.vms.values() if v["node"].lower() == node and v["state"] == "Running"]}
+
     def s_describe(self, node, args):
         vm = self.the_vm(node, args)
         return {"first": vm, "second": vm}
@@ -617,6 +628,46 @@ class NativeAdoption(Base):
         rc, out = self.run_action("statuses", payload(host={"native_adoption_status": "true"}, native_adoption_status_bindings=bindings))
         self.assertEqual(rc, 0, out)
         self.assertEqual(out["power_state"], {"i-2-9-VM": "poweron", "i-2-10-VM": "unknown", "i-2-5-VM": "poweron"})
+
+    def test_hoststats_single_read(self):
+        rc, out = self.run_action("hoststats", payload())
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["cpus"], 4)
+        self.assertEqual(out["network_rx_bytes"], 100)
+        self.assertIsNone(out["load_average"])
+        self.assertEqual([c[1] for c in self.c.calls], ["hoststats"])
+        self.assertGreater(out["timestamp"], 0)
+
+    def test_vmstats_bindings_local_and_nulls(self):
+        a, va = self.ordinary("legacy-web01")
+        b, vb = self.ordinary("renamed")
+        self.ordinary("off", state="Off")
+        self.ordinary("ordinary")
+        self.c.add_vm("elsewhere", node="HV02")
+        bindings = {str(va): {"cloudstack_instance_name": "i-2-9-VM", "expected_proxmox_name": "legacy-web01"},
+                    str(vb): {"cloudstack_instance_name": "i-2-10-VM", "expected_proxmox_name": "old"}}
+        rc, out = self.run_action("vmstats", payload(host={"native_adoption_status": "true"}, native_adoption_status_bindings=bindings))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(set(out["vms"]), {"i-2-9-VM", "ordinary"})
+        self.assertEqual(out["vms"]["i-2-9-VM"]["network_rx_bytes"], 123)
+        self.assertIsNone(out["vms"]["i-2-9-VM"]["disk_read_bytes"])
+        self.assertIsNone(out["vms"]["i-2-9-VM"]["memory_free_kb"])
+        self.assertEqual([c[1] for c in self.c.calls], ["vmstats"])
+
+    def test_vmstats_bad_bindings_and_read_failure(self):
+        rc, out = self.run_action("vmstats", payload(host={"native_adoption_status": "true"}))
+        self.assertEqual(rc, 90)
+        self.assertFalse(self.c.calls)
+        self.c.lose.add("vmstats")
+        rc, out = self.run_action("vmstats", payload())
+        self.assertEqual(rc, 90)
+
+    def test_vmstats_duplicate_key_fails_closed(self):
+        self.ordinary("same")
+        self.ordinary("same")
+        rc, out = self.run_action("vmstats", payload())
+        self.assertEqual(rc, 90)
+        self.assertIn("Duplicate VM stats key", out["error"])
 
     def test_statuses_without_native(self):
         self.ordinary("i-2-5-VM", state="Off")

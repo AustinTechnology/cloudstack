@@ -164,6 +164,63 @@ $c = Get-Cluster
 $v = TheVM; $a = Describe $v; $b = Describe (Get-VM -Id $v.Id)
 [pscustomobject]@{ first = $a; second = $b }
 """,
+    "hoststats": r"""
+$os = Get-CimInstance Win32_OperatingSystem
+$cpu = Get-CimInstance Win32_PerfFormattedData_HvStats_HyperVHypervisorLogicalProcessor | Where-Object { $_.Name -eq '_Total' }
+if (@($cpu).Count -ne 1) { Unchanged 'Hyper-V total CPU counter unavailable' }
+$cpus = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+$rx = $null; $tx = $null
+try {
+  $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop)
+  $stats = @($adapters | Get-NetAdapterStatistics -ErrorAction Stop)
+  if ($adapters.Count -gt 0 -and $stats.Count -eq $adapters.Count -and
+      @($stats | Where-Object { $null -eq $_.ReceivedBytes -or $null -eq $_.SentBytes }).Count -eq 0) {
+    $rx = [uint64]0; $tx = [uint64]0
+    foreach ($s in $stats) { $rx += [uint64]$s.ReceivedBytes; $tx += [uint64]$s.SentBytes }
+  }
+} catch { $rx = $null; $tx = $null }
+[pscustomobject]@{ node = [string]$env:COMPUTERNAME; cpu_utilization = [double]$cpu.PercentTotalRunTime
+  cpus = [int]$cpus; total_memory_kb = [int64]$os.TotalVisibleMemorySize; free_memory_kb = [int64]$os.FreePhysicalMemory
+  network_rx_bytes = $rx; network_tx_bytes = $tx; load_average = $null }
+""",
+    "vmstats": r"""
+$all = @(Get-VM)
+$processors = $null
+try { $processors = @(Get-CimInstance -Namespace root/virtualization/v2 -ClassName Msvm_Processor -ErrorAction Stop) } catch { }
+$counter = $null
+try { $counter = @(Get-CimInstance Win32_PerfRawData_NvspNicStats_HyperVVirtualNetworkAdapter -ErrorAction Stop) } catch { }
+$vms = @(foreach ($vm in $all) {
+  if ([string]$vm.State -ne 'Running') { continue }
+  $rx = $null; $tx = $null
+  try {
+    $adapters = @(Get-VMNetworkAdapter -VM $vm -ErrorAction Stop)
+    if ($null -ne $counter -and $adapters.Count -gt 0) {
+      $r = [uint64]0; $t = [uint64]0; $valid = $true
+      foreach ($a in $adapters) {
+        if ([string]$a.Id -notmatch '^Microsoft:([0-9a-fA-F-]{36})\\([0-9a-fA-F-]{36})$' -or $Matches[1] -ine [string]$vm.Id) { $valid = $false; break }
+        $suffix = '_' + $Matches[1] + '--' + $Matches[2]
+        $matches = @($counter | Where-Object { ([string]$_.Name).EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase) })
+        if ($matches.Count -ne 1 -or $null -eq $matches[0].BytesReceivedPersec -or $null -eq $matches[0].BytesSentPersec) { $valid = $false; break }
+        $r += [uint64]$matches[0].BytesReceivedPersec; $t += [uint64]$matches[0].BytesSentPersec
+      }
+      if ($valid) { $rx = $r; $tx = $t }
+    }
+  } catch { $rx = $null; $tx = $null }
+  $cpu = $null
+  if ($null -ne $processors -and $vm.ProcessorCount -gt 0) {
+    $vp = @($processors | Where-Object { $_.SystemName -ieq [string]$vm.Id })
+    if ($vp.Count -eq $vm.ProcessorCount -and @($vp | Where-Object { $null -eq $_.LoadPercentage -or $_.LoadPercentage -gt 100 }).Count -eq 0 -and
+        @($vp | Select-Object -ExpandProperty DeviceID -Unique).Count -eq $vp.Count) {
+      $cpu = [double](($vp | Measure-Object -Property LoadPercentage -Average).Average)
+    }
+  }
+  [pscustomobject]@{ guid = [string]$vm.Id; name = [string]$vm.Name; notes = [string]$vm.Notes
+    cpus = [int]$vm.ProcessorCount; cpu_utilization = $cpu; memory_kb = [int64]($vm.MemoryAssigned / 1024)
+    memory_free_kb = $null; memory_target_kb = $null; network_rx_bytes = $rx; network_tx_bytes = $tx
+    disk_read_bytes = $null; disk_write_bytes = $null; disk_read_ios = $null; disk_write_ios = $null }
+})
+[pscustomobject]@{ node = [string]$env:COMPUTERNAME; vms = $vms }
+""",
     "storage": r"""
 $out = @()
 foreach ($csv in @(Get-ClusterSharedVolume)) {
@@ -511,7 +568,7 @@ Describe (Get-VM -Id $v.Id)
 # cluster, its storages and the first node's VMs are read in one run.
 SCRIPTS["overview"] = "[pscustomobject]@{ cluster = & { %s }; storage = @(& { %s }); inventory = & { %s } }" % (
     SCRIPTS["cluster"], SCRIPTS["storage"], SCRIPTS["inventory"])
-READ_ONLY_SCRIPTS = {"cluster", "nodes", "inventory", "describe", "storage", "isofind", "isostat", "overview"}
+READ_ONLY_SCRIPTS = {"cluster", "nodes", "inventory", "describe", "storage", "isofind", "isostat", "overview", "hoststats", "vmstats"}
 
 
 class WinRMTransport:
@@ -1173,6 +1230,20 @@ class Extension:
         state = {"Running": "poweron", "Off": "poweroff"}.get(vm["state"], "unknown")
         return {"status": "success", "power_state": state, "ha_enabled": bool(vm.get("clustered"))}
 
+    def status_bindings(self):
+        native = self.host.get("native_adoption_status") or "false"
+        if native not in ("true", "false"):
+            raise Fail("Invalid native_adoption_status host detail")
+        if native != "true":
+            return {}
+        bindings = self.payload.get("native_adoption_status_bindings")
+        if not isinstance(bindings, dict) or any(
+                not isinstance(k, str) or not re.match(r"^[1-9][0-9]*$", k) or not isinstance(b, dict)
+                or not b.get("cloudstack_instance_name") or not b.get("expected_proxmox_name")
+                for k, b in bindings.items()):
+            raise Fail("Invalid native adoption status bindings")
+        return bindings
+
     def do_statuses(self):
         node = self.settings["node"]
         self.cluster()
@@ -1181,16 +1252,7 @@ class Extension:
             vm["guid"] = vm["guid"].lower()
             vm["vmid"] = vmid_of(vm["guid"], vm.get("notes"))
         state = {"Running": "poweron", "Off": "poweroff"}
-        native = self.host.get("native_adoption_status") or "false"
-        if native not in ("true", "false"):
-            raise Fail("Invalid native_adoption_status host detail")
-        bindings = {}
-        if native == "true":
-            bindings = self.payload.get("native_adoption_status_bindings")
-            if not isinstance(bindings, dict) or any(
-                    not re.match(r"^[1-9][0-9]*$", k) or not isinstance(b, dict) or not b.get("cloudstack_instance_name")
-                    or not b.get("expected_proxmox_name") for k, b in bindings.items()):
-                raise Fail("Invalid native adoption status bindings")
+        bindings = self.status_bindings()
         rows, ids = [], [vm["vmid"] for vm in vms]
         if len(set(ids)) != len(ids):
             raise Fail("Duplicate VMIDs on the node")
@@ -1206,6 +1268,42 @@ class Extension:
         for key, value in rows:
             power[key] = "unknown" if key in power else value
         return {"status": "success", "power_state": power}
+
+    def stats_view(self, script):
+        node = self.settings["node"]
+        if not node:
+            raise Fail("The host has no node detail")
+        view = self.call(node, script, {"roots": {}}, timeout=40)
+        if not isinstance(view, dict) or str(view.get("node") or "").lower() != node:
+            raise Fail("The node identity does not match the host")
+        return view
+
+    def do_hoststats(self):
+        view = self.stats_view("hoststats")
+        fields = ("cpu_utilization", "cpus", "total_memory_kb", "free_memory_kb", "network_rx_bytes", "network_tx_bytes", "load_average")
+        return dict(status="success", timestamp=time.time(), **{k: view.get(k) for k in fields})
+
+    def do_vmstats(self):
+        bindings = self.status_bindings()
+        view = self.stats_view("vmstats")
+        vms = as_list(view.get("vms"))
+        ids = [vmid_of(vm["guid"], vm.get("notes")) for vm in vms]
+        if len(set(ids)) != len(ids):
+            raise Fail("Duplicate VMIDs on the node")
+        fields = ("cpus", "cpu_utilization", "memory_kb", "memory_free_kb", "memory_target_kb", "network_rx_bytes",
+                  "network_tx_bytes", "disk_read_bytes", "disk_write_bytes", "disk_read_ios", "disk_write_ios")
+        result = {}
+        for vm, vmid in zip(vms, ids):
+            binding = bindings.get(str(vmid))
+            if binding and vm["name"] != binding["expected_proxmox_name"]:
+                continue
+            key = binding["cloudstack_instance_name"] if binding else vm["name"]
+            if not key:
+                continue
+            if key in result:
+                raise Fail("Duplicate VM stats key on the node")
+            result[key] = {k: vm.get(k) for k in fields}
+        return {"status": "success", "timestamp": time.time(), "vms": result}
 
     def do_health(self):
         """Is a node up? Without a "node" parameter: can this host's own node be reached, and is it an up member of

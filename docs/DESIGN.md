@@ -41,6 +41,41 @@ Cluster identity: the detail `hyperv_cluster`, compared with the WSFC name (`(Ge
 mismatch fails closed. CloudStack's detail key is still `proxmox_cluster`; the extension accepts either and requires
 them to agree.
 
+## Read-only metrics (`hoststats`, `vmstats`)
+
+These draft-v1 actions use one WinRM call to the host's configured node and reject a returned short-node identity
+mismatch. They do not query FailoverClusters, enable metering, persist baselines, or validate cluster membership on
+this fast path. `vmstats` returns only local running VMs, applies the same VMID and native-status bindings as
+`statuses`, omits a bound VM on provider-name drift, and fails closed on duplicate VMIDs or result keys. Java owns
+counter deltas and must treat reset/decrease as a new baseline. The extension does not enable CloudStack's capability.
+
+* Host CPU: formatted `Hyper-V Hypervisor Logical Processor(_Total) % Total Run Time`; CPU count from
+  `Win32_ComputerSystem.NumberOfLogicalProcessors`; memory total/free KB from `Win32_OperatingSystem`.
+  Host network RX/TX: sum `Get-NetAdapterStatistics` for all `Get-NetAdapter -Physical` adapters; if incomplete,
+  both are null. Load average is null. This measures physical interfaces, not guest vNIC traffic.
+* VM CPUs and assigned bytes: local `Get-VM`; bytes divided by 1024. CPU utilization is the average of all
+  `Msvm_Processor.LoadPercentage` vCPUs, mapped by exact `SystemName` VM GUID; missing/duplicate/incomplete vCPU
+  samples yield null. `Get-VM.CPUUsage` is not used as the contract asks for percent of allocated vCPUs, not a
+  possibly host-normalized percentage. Free guest memory and balloon target are null: MemoryDemand is not free RAM
+  and is not asserted to be a balloon target.
+* VM network: cumulative `Win32_PerfRawData_NvspNicStats_HyperVVirtualNetworkAdapter` bytes; every adapter must
+  match exactly by both VM GUID and adapter GUID from `Get-VMNetworkAdapter.Id`, uniquely, or both directions are
+  null. No adapter also yields null. Legacy/unavailable counters and partial multisets are not treated as zero.
+* All VM disk byte/IO counters are null. In the lab, raw `Win32_PerfRawData_Counters_HyperVVirtualStorageDevice`
+  has cumulative counts, but its instance name transforms `\\` to `-`, losing the distinction from literal hyphens
+  in paths. Exact VHD-path identity cannot be proven from that name; assigning these counts would risk attribution
+  to the wrong VM. This is a material metrics-contract limitation, not a measured zero.
+
+Lab direct action runs on both Windows Server 2025 nodes (not CloudStack polling): hoststats 15.68s/14.22s;
+vmstats 21.27s and 17.84s on hv01, 8.51s and 4.01s on hv02. On hv01 a bound running Windows guest had two CPUs,
+1.5% then 6% vCPU utilization, 2,097,152 KB assigned, and RX 11,970 then 12,312 bytes (TX 12,207 in both);
+all four disk fields and both guest-memory fields were null. The hv02 result correctly excluded that guest. Host
+hv01 reported four logical CPUs, 14,679,496 KB total and 8,364,844 KB free; live values are snapshots, not expected
+constants. Direct raw CIM, `Get-VM`, `Get-NetAdapterStatistics`, and Hyper-V `Get-Counter` probes confirmed source
+availability and scale, not simultaneous equality. VM network RX increased during naturally occurring traffic; no
+load was generated inside the guest and disk-I/O increments were not verified. CloudStack Java integration, UI,
+reset handling and a controlled guest-I/O exercise remain untested.
+
 ## Configuration snapshot (`getconfig`)
 
 - `identity`: cluster, vmid, VM name, owner node (short, lowercase).

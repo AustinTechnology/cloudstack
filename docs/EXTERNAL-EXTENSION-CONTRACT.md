@@ -40,6 +40,18 @@ These are extension **details**, string values rather than JSON booleans. Set to
 
 `native_adoption_status` and `native_adoption_lifecycle` are separate **host details**, not extension capability flags; Java accepts exact lowercase `true` or `false`, or missing as false, and rejects other values. Enabling one does not enable the other. Native adoption requires both true on the mapped host. [P:244–250,321–327; A:232–245]
 
+### Draft metrics extension (separately coordinated Java work)
+
+The draft `METRICS-CONTRACT.md` adds the host-envelope read-only actions `hoststats` and `vmstats`, gated by
+`instancestatssupported`; that gate is not set by this extension. `hoststats` returns epoch `timestamp`, node CPU
+percent, logical `cpus`, `total_memory_kb`, `free_memory_kb`, cumulative `network_rx_bytes`/`network_tx_bytes`, and
+`load_average`. `vmstats` returns epoch `timestamp` and a `vms` map: `cpus`, `cpu_utilization`, `memory_kb`,
+`memory_free_kb`, `memory_target_kb`, network RX/TX bytes, disk read/write bytes and disk read/write IOs. Unknowns
+are JSON null. Native binding keys and name-drift rules are those in the draft; only this node's running VMs are
+returned. Java computes deltas and handles counter resets. This is a draft extension to the source-derived baseline,
+not a claim that the above cited historical fork supports these actions. The exact field sources, explicit disk
+attribution limitation, and sanitized direct live results are in `DESIGN.md` under Read-only metrics.
+
 ## 3. Action reference
 
 The common envelope, process rules and native-adoption context in §§1, 7 apply to each row. “Success JSON” below distinguishes what Java actually parses from stronger recommended provider postconditions. Where Java relies only on exit 0, return `{"status":"success"}`; do not infer Java itself confirmed the postcondition. Wait is the enclosing command's wait unless a specific override is listed in §6. `parameters` values are JSON numbers/booleans where the Java source passes numbers/booleans; VM detail maps generally contain strings.
