@@ -207,6 +207,16 @@ configured; the ping investigator then "pinged" the host address `External` succ
 - Without a confirming peer the host goes `Alert` instead of `Down` (seen in build `hosthealth-a`, before the ping-test
   fix).
 
+### Windows guest (Windows Server 2025 Core, Gen 2, Secure Boot, no vTPM)
+
+`hvwin01`, built out of band, adopted natively (running, no restart) as `i-5-203-VM`. Through CloudStack, all passed
+with no leases left: refresh took the IP 10.100.0.50 from the host (integration-services KVP, no agent install);
+disk-only Instance Snapshot while running (a Production checkpoint, VSS in the guest) and delete; memory snapshot,
+revert, delete; data disk add 1 GiB, grow to 2 GiB, delete while running; graceful reboot, stop and start through
+the guest shutdown service; console (websocket 101 + RFB 3.8). Adoption first failed: its provider read had a fixed
+60 s wait and two settled reads of the busy nested host took ~45-65 s; it now uses the agent wait, as refresh does.
+vTPM is not tested (needs the shared guardian).
+
 ### Not yet tested live
 
 KVP addresses and Production checkpoints of an integration-services guest, Secure Boot +
