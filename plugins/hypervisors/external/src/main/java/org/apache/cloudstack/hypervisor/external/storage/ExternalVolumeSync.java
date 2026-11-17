@@ -47,6 +47,7 @@ import com.cloud.storage.dao.DiskOfferingDao;
 import com.cloud.storage.dao.VMTemplateDao;
 import com.cloud.storage.dao.VolumeDao;
 import com.cloud.storage.dao.VolumeDetailsDao;
+import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.user.Account;
 import com.cloud.user.AccountService;
 import com.cloud.user.ResourceLimitService;
@@ -74,7 +75,7 @@ public class ExternalVolumeSync {
         @SerializedName("bytes") final long bytes;
         @SerializedName("diskoffering") final String diskOffering;
         @SerializedName("applied") final boolean applied;
-        Change(String device, String volumeId, String action, String type, Long previousBytes, long bytes, String diskOffering, boolean applied) {
+        public Change(String device, String volumeId, String action, String type, Long previousBytes, long bytes, String diskOffering, boolean applied) {
             this.device = device;
             this.volumeId = volumeId;
             this.action = action;
@@ -92,6 +93,8 @@ public class ExternalVolumeSync {
     }
 
     protected org.apache.logging.log4j.Logger logger = org.apache.logging.log4j.LogManager.getLogger(getClass());
+
+    static final long GIB = 1024L * 1024 * 1024;
 
     @Inject VolumeDao volumeDao;
     @Inject VolumeDetailsDao volumeDetailsDao;
@@ -117,6 +120,21 @@ public class ExternalVolumeSync {
      */
     public List<Change> sync(VMInstanceVO vm, long clusterId, ExternalVmConfiguration snapshot, boolean dryRun, List<String> unresolved) {
         return sync(vm, vm == null ? null : accountService.getAccount(vm.getAccountId()), clusterId, snapshot, dryRun, unresolved);
+    }
+
+    /**
+     * Every instance has a root volume record. An adoption whose boot disk would not be recorded as the root
+     * volume (its storage is not registered, not reached by the cluster, or has no disk offering) is refused,
+     * with the reasons the disks gave.
+     */
+    public static void requireRoot(List<Change> changes, List<String> unresolved) {
+        for (Change change : changes) {
+            if ("ROOT".equals(change.type)) {
+                return;
+            }
+        }
+        throw new InvalidParameterValueException("The instance's boot disk cannot be recorded as its root volume"
+                + (unresolved.isEmpty() ? "" : ": " + String.join("; ", unresolved)));
     }
 
     /** @param owner the account the volumes are, or would be, counted against; null when it is not known */
@@ -414,6 +432,78 @@ public class ExternalVolumeSync {
         volumeDao.update(volume.getId(), volume);
         volumeDao.attachVolume(volume.getId(), vm.getId(), deviceId);
         saveSlot(volume.getId(), device);
+    }
+
+    /**
+     * What the extension needs to create an instance from a template so that its boot disk is the root volume the
+     * instance was allocated: the storage and the size of that disk. The storage is the one of the root volume's
+     * offering when that is the disk offering of an External storage; otherwise the template's storage, and the
+     * volume takes that storage's offering. The size is the larger of the volume's and the template's. Nothing has
+     * been created at the provider when this refuses. Empty when the instance was allocated no root volume.
+     */
+    public Map<String, String> templateDeployment(long clusterId, VMInstanceVO vm, String templateStorage, String templateSizeGb) {
+        Map<String, String> details = new HashMap<>();
+        if (!inventory.supported(clusterId)) {
+            return details;
+        }
+        VolumeVO root = null;
+        for (VolumeVO volume : volumeDao.findByInstanceAndType(vm.getId(), Volume.Type.ROOT)) {
+            if (live(volume) && volume.getState() == Volume.State.Allocated && volume.getPoolId() == null && volume.getPath() == null) {
+                root = volume;
+            }
+        }
+        if (root == null) {
+            return details;
+        }
+        DiskOfferingVO own = diskOfferingDao.findByIdIncludingRemoved(root.getDiskOfferingId());
+        StoragePoolVO pool = pool(vm.getDataCenterId(), own);
+        DiskOfferingVO offering = own;
+        if (pool == null) {
+            StoragePoolVO named = null;
+            for (StoragePoolVO candidate : poolDao.listByDataCenterId(vm.getDataCenterId())) {
+                if (ExternalPrimaryDataStoreProvider.NAME.equals(candidate.getStorageProviderName()) && candidate.getRemoved() == null
+                        && candidate.getStatus() == com.cloud.storage.StoragePoolStatus.Up && candidate.getPath().equals(templateStorage)) {
+                    named = candidate;
+                }
+            }
+            offering = named == null ? null : offering(named);
+            if (offering == null) {
+                throw new InvalidParameterValueException("The root disk needs an External storage: the root disk offering is not the disk offering of one, and the template's storage "
+                        + (templateStorage == null || templateStorage.isEmpty() ? "is not set" : templateStorage + " is not a registered External storage with one disk offering"));
+            }
+            pool = named;
+        }
+        if (!inventory.reaches(pool, clusterId, true)) {
+            throw new InvalidParameterValueException("The instance's cluster does not reach the storage " + pool.getName() + " of its root disk");
+        }
+        long allocated = root.getSize() == null ? 0 : root.getSize();
+        long templateBytes = templateSizeGb != null && templateSizeGb.matches("[1-9][0-9]{0,5}") ? Long.parseLong(templateSizeGb) * GIB : 0;
+        long size = (Math.max(allocated, templateBytes) + GIB - 1) / GIB * GIB;
+        if (size <= 0) {
+            throw new InvalidParameterValueException("The root disk has no size: give a root disk size, or a template with a disk_size_gb detail");
+        }
+        if (size > allocated) {
+            try {
+                resourceLimits.checkResourceLimit(accountService.getAccount(vm.getAccountId()), ResourceType.primary_storage, size - allocated);
+            } catch (com.cloud.exception.ResourceAllocationException e) {
+                throw new InvalidParameterValueException("The root disk would exceed the owner's primary storage limit: " + e.getMessage());
+            }
+        }
+        if (offering.getId() != own.getId()) {
+            // The volume is counted and billed as the storage's offering from now on.
+            root.setDiskOfferingId(offering.getId());
+            volumeDao.update(root.getId(), root);
+            resourceLimits.updateVolumeResourceCountForDiskOfferingChange(root.getAccountId(), root.isDisplayVolume(), allocated, allocated, own, offering);
+            if (size == allocated) {
+                publish(EventTypes.EVENT_VOLUME_RESIZE, root, size);
+            }
+        }
+        if (size > allocated) {
+            resize(root, size);
+        }
+        details.put("storage", pool.getPath());
+        details.put("disk_size_gb", Long.toString(size / GIB));
+        return details;
     }
 
     /** Records where the disk of an allocated root volume was created. It was counted when it was allocated. */

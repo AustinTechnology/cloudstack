@@ -491,4 +491,64 @@ public class ExternalVolumeSyncTest {
         assertEquals(StoragePoolType.PreSetup, ExternalPrimaryDataStoreLifeCycle.poolType("zfspool"));
         assertNull(new ExternalPrimaryDataStoreDriver().getTO(null));
     }
+
+    private VolumeVO allocatedRoot() {
+        VolumeVO root = mock(VolumeVO.class);
+        when(root.getId()).thenReturn(90L);
+        when(root.getVolumeType()).thenReturn(Volume.Type.ROOT);
+        when(root.getState()).thenReturn(Volume.State.Allocated);
+        when(root.getPoolId()).thenReturn(null);
+        when(root.getSize()).thenReturn(GIB);
+        when(root.getAccountId()).thenReturn(40L);
+        when(root.getDiskOfferingId()).thenReturn(70L);
+        DiskOfferingVO computeRoot = mock(DiskOfferingVO.class);
+        when(computeRoot.getId()).thenReturn(70L);
+        when(sync.diskOfferingDao.findByIdIncludingRemoved(70L)).thenReturn(computeRoot);
+        when(sync.volumeDao.findByInstanceAndType(10L, Volume.Type.ROOT)).thenReturn(Collections.singletonList(root));
+        when(vm.getDataCenterId()).thenReturn(3L);
+        when(pool.getStatus()).thenReturn(com.cloud.storage.StoragePoolStatus.Up);
+        when(offering.getId()).thenReturn(60L);
+        when(sync.inventory.supported(7L)).thenReturn(true);
+        return root;
+    }
+
+    @Test
+    public void aTemplateDeploymentCreatesTheBootDiskAsTheAllocatedRootVolume() throws Exception {
+        VolumeVO root = allocatedRoot();
+        // The root offering of a compute offering names no External storage: the template's storage gives it, and
+        // the volume takes that storage's offering. The size is the larger of the volume's and the template's.
+        java.util.Map<String, String> details = sync.templateDeployment(7L, vm, "ssd", "4");
+        assertEquals("ssd", details.get("storage"));
+        assertEquals("4", details.get("disk_size_gb"));
+        verify(sync.resourceLimits).checkResourceLimit(any(), eq(com.cloud.configuration.Resource.ResourceType.primary_storage), eq(3 * GIB));
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(root);
+        order.verify(root).setDiskOfferingId(60L);
+        order.verify(root).setSize(4 * GIB);
+        verify(sync.inventory).reaches(pool, 7L, true);
+    }
+
+    @Test
+    public void aTemplateDeploymentIsRefusedBeforeAnythingIsCreatedWhenTheRootHasNoExternalStorage() {
+        allocatedRoot();
+        InvalidParameterValueException e = assertThrows(InvalidParameterValueException.class, () -> sync.templateDeployment(7L, vm, "local-lvm", "4"));
+        assertTrue(e.getMessage(), e.getMessage().contains("local-lvm is not a registered External storage"));
+        when(sync.inventory.reaches(eq(pool), eq(7L), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(false);
+        e = assertThrows(InvalidParameterValueException.class, () -> sync.templateDeployment(7L, vm, "ssd", "4"));
+        assertTrue(e.getMessage(), e.getMessage().contains("does not reach the storage"));
+        // An extension that does not record storage allocated no root volume and is told nothing.
+        when(sync.inventory.supported(7L)).thenReturn(false);
+        assertTrue(sync.templateDeployment(7L, vm, "local-lvm", "4").isEmpty());
+    }
+
+    @Test
+    public void anAdoptionNeedsItsBootDiskAsTheRootVolume() {
+        List<ExternalVolumeSync.Change> changes = sync.sync(vm, 7L, snapshot(DATA_DISK, ROOT_DISK), true, unresolved);
+        ExternalVolumeSync.requireRoot(changes, unresolved);
+        String other = ROOT_DISK.replace("\"storage\":\"ssd\"", "\"storage\":\"local-lvm\"").replace("ssd:", "local-lvm:");
+        List<String> notes = new ArrayList<>();
+        changes = sync.sync(vm, 7L, snapshot(DATA_DISK, other), true, notes);
+        List<ExternalVolumeSync.Change> found = changes;
+        InvalidParameterValueException e = assertThrows(InvalidParameterValueException.class, () -> ExternalVolumeSync.requireRoot(found, notes));
+        assertTrue(e.getMessage(), e.getMessage().contains("local-lvm, which is not registered"));
+    }
 }

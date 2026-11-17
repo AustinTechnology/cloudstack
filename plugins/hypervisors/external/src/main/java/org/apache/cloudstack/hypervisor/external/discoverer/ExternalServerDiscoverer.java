@@ -70,6 +70,9 @@ public class ExternalServerDiscoverer extends DiscovererBase implements Discover
     @Inject
     ExtensionsManager extensionsManager;
 
+    @Inject
+    org.apache.cloudstack.hypervisor.external.storage.ExternalStorageInventory storageInventory;
+
     @Override
     public boolean processAnswers(long agentId, long seq, Answer[] answers) {
         return false;
@@ -92,7 +95,16 @@ public class ExternalServerDiscoverer extends DiscovererBase implements Discover
 
     @Override
     public void processConnect(Host host, StartupCommand cmd, boolean forRebalance) throws ConnectionException {
-
+        if (!(cmd instanceof StartupRoutingCommand) || host.getHypervisorType() != Hypervisor.HypervisorType.External || storageInventory == null) {
+            return;
+        }
+        // Stock storage connection skips External hosts; the host is linked here with the External storage its
+        // cluster was verified to reach, so that placement on it checks that storage as on any hypervisor.
+        try {
+            storageInventory.link(host);
+        } catch (RuntimeException e) {
+            logger.warn("External host {} was not linked with its storage: {}", host, e.getMessage());
+        }
     }
 
     @Override

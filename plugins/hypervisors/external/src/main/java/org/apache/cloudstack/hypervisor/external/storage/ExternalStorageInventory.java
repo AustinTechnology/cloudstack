@@ -99,6 +99,8 @@ public class ExternalStorageInventory {
     @Inject ClusterDao clusterDao;
     @Inject StoragePoolDetailsDao poolDetailsDao;
     @Inject HostDao hostDao;
+    @Inject com.cloud.storage.dao.StoragePoolHostDao storagePoolHostDao;
+    @Inject org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao poolDao;
     @Inject ExtensionHelper extensionHelper;
     @Inject ExtensionDetailsDao extensionDetailsDao;
     @Inject ExtensionsManager extensionsManager;
@@ -157,6 +159,81 @@ public class ExternalStorageInventory {
         return result;
     }
 
+    /** What each cluster last reported, for the statistics that are read every minute for every pool. */
+    private final Map<Long, Map.Entry<Long, List<Storage>>> recent = new java.util.concurrent.ConcurrentHashMap<>();
+    static final long RECENT_MS = 50_000L;
+
+    /** As findAny, but a cluster's report is reused for a short while: one provider read serves every pool. */
+    public Storage findAnyRecent(StoragePoolVO pool) {
+        Map<String, String> details = poolDetailsDao.listDetailsKeyPairs(pool.getId());
+        for (ClusterVO cluster : clusters(pool.getDataCenterId())) {
+            if (!details.containsKey(CLUSTER + cluster.getUuid())) {
+                continue;
+            }
+            try {
+                Map.Entry<Long, List<Storage>> last = recent.get(cluster.getId());
+                long now = System.currentTimeMillis();
+                if (last == null || now - last.getKey() > RECENT_MS || now < last.getKey()) {
+                    last = new java.util.AbstractMap.SimpleImmutableEntry<>(now, list(cluster.getId()));
+                    recent.put(cluster.getId(), last);
+                }
+                for (Storage storage : last.getValue()) {
+                    if (storage.name.equals(pool.getPath())) {
+                        return storage;
+                    }
+                }
+            } catch (RuntimeException e) {
+                // the next cluster
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Stock placement treats a host as reaching a pool when the pool is linked with it. An External pool is
+     * linked with every host of each cluster whose storage of the pool's name was verified to be the pool's
+     * storage (the externalCluster.<cluster> details), and with no other host.
+     */
+    public void link(StoragePoolVO pool) {
+        Map<String, String> details = poolDetailsDao.listDetailsKeyPairs(pool.getId());
+        for (ClusterVO cluster : clusterDao.listByDcHyType(pool.getDataCenterId(), HypervisorType.External.toString())) {
+            if (cluster.getRemoved() == null && details.containsKey(CLUSTER + cluster.getUuid())) {
+                linkCluster(pool.getId(), cluster.getId());
+            }
+        }
+    }
+
+    /** Links a host, as it connects, with the External pools its cluster was verified to reach. */
+    public void link(com.cloud.host.Host host) {
+        if (host.getHypervisorType() != HypervisorType.External || host.getClusterId() == null || host.getType() != com.cloud.host.Host.Type.Routing) {
+            return;
+        }
+        ClusterVO cluster = clusterDao.findById(host.getClusterId());
+        if (cluster == null) {
+            return;
+        }
+        for (StoragePoolVO pool : poolDao.listByDataCenterId(host.getDataCenterId())) {
+            if (ExternalPrimaryDataStoreProvider.NAME.equals(pool.getStorageProviderName()) && pool.getRemoved() == null
+                    && poolDetailsDao.listDetailsKeyPairs(pool.getId()).containsKey(CLUSTER + cluster.getUuid())) {
+                linkHost(pool.getId(), host.getId());
+            }
+        }
+    }
+
+    private void linkCluster(long poolId, long clusterId) {
+        for (HostVO host : hostDao.findByClusterId(clusterId)) {
+            if (host.getHypervisorType() == HypervisorType.External && host.getRemoved() == null && host.getType() == com.cloud.host.Host.Type.Routing) {
+                linkHost(poolId, host.getId());
+            }
+        }
+    }
+
+    private void linkHost(long poolId, long hostId) {
+        if (storagePoolHostDao.findByPoolHost(poolId, hostId) == null) {
+            storagePoolHostDao.persist(new com.cloud.storage.StoragePoolHostVO(poolId, hostId, ""));
+        }
+    }
+
     /** The pool's storage as the first cluster that can be asked reports it; null when none can. */
     public Storage findAny(StoragePoolVO pool) {
         Map<String, String> details = poolDetailsDao.listDetailsKeyPairs(pool.getId());
@@ -197,6 +274,7 @@ public class ExternalStorageInventory {
         }
         if (remember) {
             poolDetailsDao.addDetail(pool.getId(), CLUSTER + cluster.getUuid(), providerCluster(clusterId), true);
+            linkCluster(pool.getId(), clusterId);
         }
         return true;
     }

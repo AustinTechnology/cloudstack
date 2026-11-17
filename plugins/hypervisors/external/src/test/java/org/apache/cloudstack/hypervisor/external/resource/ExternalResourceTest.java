@@ -168,14 +168,27 @@ public class ExternalResourceTest {
     }
 
     @Test
-    public void outOfOrderSamplesFailWithoutReplacingBaseline() {
+    public void aSampleFromAnEarlierClockIsANewBaseline() {
         ExternalProvisioner p = readyResourceWithProvisioner();
         when(p.getMetrics(any(), any(), any(), org.mockito.ArgumentMatchers.eq(true)))
-                .thenReturn(vmMetrics(2, 1024, 0, 0, 0, "null"), vmMetrics(1, 2048, 0, 0, 0, "null"), vmMetrics(3, 3072, 0, 0, 0, "null"));
+                .thenReturn(vmMetrics(2, 1024, 0, 0, 0, "null"), vmMetrics(1, 4096, 0, 0, 0, "null"), vmMetrics(3, 5120, 0, 0, 0, "null"));
         com.cloud.agent.api.GetVmStatsCommand cmd = new com.cloud.agent.api.GetVmStatsCommand(java.util.List.of("vm"), "External:guid", "host");
         externalResource.executeRequest(cmd);
-        assertFalse(externalResource.executeRequest(cmd).getResult());
-        assertEquals(2, ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap().get("vm").getNetworkReadKBs(), 0);
+        assertEquals(0, ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap().get("vm").getNetworkReadKBs(), 0);
+        assertEquals(1, ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap().get("vm").getNetworkReadKBs(), 0);
+    }
+
+    @Test
+    public void oneInstancesBadValuesDoNotVoidTheOthersAndCpuIsCapped() {
+        ExternalProvisioner p = readyResourceWithProvisioner();
+        when(p.getMetrics(any(), any(), any(), org.mockito.ArgumentMatchers.eq(true))).thenReturn("{\"status\":\"success\",\"timestamp\":1,\"vms\":{"
+                + "\"busy\":{\"cpus\":2,\"cpu_utilization\":130,\"memory_kb\":4096},"
+                + "\"bad\":{\"cpus\":0,\"cpu_utilization\":5,\"memory_kb\":4096},"
+                + "\"partial\":{\"cpus\":2,\"cpu_utilization\":null,\"memory_kb\":4096}}}");
+        com.cloud.agent.api.GetVmStatsCommand cmd = new com.cloud.agent.api.GetVmStatsCommand(java.util.List.of("busy", "bad", "partial"), "External:guid", "host");
+        java.util.Map<String, com.cloud.agent.api.VmStatsEntry> stats = ((com.cloud.agent.api.GetVmStatsAnswer) externalResource.executeRequest(cmd)).getVmStatsMap();
+        assertEquals(java.util.Set.of("busy"), stats.keySet());
+        assertEquals(100, stats.get("busy").getCPUUtilization(), 0);
     }
 
     @Test

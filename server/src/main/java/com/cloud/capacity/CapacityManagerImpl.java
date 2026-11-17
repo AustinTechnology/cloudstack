@@ -667,17 +667,30 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
     }
 
     static boolean hasReportedCapacity(Host host) {
-        return host.getCpus() != null && host.getCpus() > 0 && host.getTotalMemory() != null && host.getTotalMemory() > 0;
+        return host.getCpus() != null && host.getCpus() > 0 && host.getSpeed() != null && host.getSpeed() > 0
+                && host.getTotalMemory() != null && host.getTotalMemory() > 0;
     }
 
     @DB
     @Override
     public void updateCapacityForHost(final Host host) {
-        // External hosts have capacity rows only when their extension reports the node's real CPU and memory, so
-        // dashboards show them; placement still skips External capacity checks.
-        if (HypervisorType.External.equals(host.getHypervisorType()) && !hasReportedCapacity(host)) {
+        // External hosts have capacity rows only when their extension reports the node's real CPU and memory.
+        if (!HypervisorType.External.equals(host.getHypervisorType())) {
+            updateCapacityRowsForHost(host);
             return;
         }
+        if (!hasReportedCapacity(host)) {
+            return;
+        }
+        // The rows are bookkeeping; an instance whose details cannot be counted must not stop the host connecting.
+        try {
+            updateCapacityRowsForHost(host);
+        } catch (RuntimeException e) {
+            logger.warn("Capacity of External host {} was not updated: {}", host, e.getMessage());
+        }
+    }
+
+    private void updateCapacityRowsForHost(final Host host) {
         long usedCpuCore = 0;
         long reservedCpuCore = 0;
         long usedCpu = 0;

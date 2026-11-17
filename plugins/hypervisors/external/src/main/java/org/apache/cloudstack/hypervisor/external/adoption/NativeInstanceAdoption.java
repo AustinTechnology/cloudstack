@@ -35,6 +35,7 @@ import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.hypervisor.external.refresh.ExternalVmConfiguration;
 import org.apache.cloudstack.hypervisor.external.refresh.ExternalVmRefreshManager;
+import org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync;
 import org.apache.cloudstack.resourcelimit.Reserver;
 
 import com.cloud.agent.AgentManager;
@@ -129,12 +130,19 @@ public class NativeInstanceAdoption {
 
     /** A provider read for a guest that has no CloudStack instance yet. */
     ExternalVmConfiguration snapshot(HostVO host, String cluster, int vmid) {
+        // As refresh does: a provider read can be slow (two settled reads of a busy host), so use the agent wait.
+        return snapshot(host, cluster, vmid, AgentManager.Wait.value());
+    }
+
+    /** The re-read inside the adoption's transaction holds its rows while it waits, so it waits less. */
+    static final int IN_TRANSACTION_READ_WAIT = 180;
+
+    ExternalVmConfiguration snapshot(HostVO host, String cluster, int vmid, int wait) {
         Map<String, Map<String, String>> access = new HashMap<>(extensionsManager.getExternalAccessDetails(host, null));
         access.put(ApiConstants.VIRTUAL_MACHINE, Map.of("proxmox_vmid", Integer.toString(vmid)));
         RunCustomActionCommand cmd = new RunCustomActionCommand(ExtensionsManager.GET_CONFIG_ACTION);
         cmd.setExternalDetails(access);
-        // As refresh does: a provider read can be slow (two settled reads of a busy host), so use the agent wait.
-        cmd.setWait(AgentManager.Wait.value());
+        cmd.setWait(wait);
         Answer answer = agentManager.easySend(host.getId(), cmd);
         if (answer == null || !answer.getResult()) {
             // The extension's own error text names the cause, such as a config lock or pending changes.
@@ -302,11 +310,13 @@ public class NativeInstanceAdoption {
 
         final ExternalAdoptionResponse response = new ExternalAdoptionResponse(request.dryRun, cluster, request.vmid, snapshot.node,
                 snapshot.name, snapshot.power, snapshot.cpus, snapshot.memoryMb, nicReport);
-        // Disks are recorded as volumes where their storage is registered. A disk that cannot be recorded is
-        // reported and does not stop the adoption: the instance is adopted with the disks it has.
+        // Disks are recorded as volumes where their storage is registered. The boot disk must be: it is the
+        // instance's root volume. Any other disk that cannot be recorded is reported and does not stop the adoption.
+        List<String> plannedNotes = new ArrayList<>();
+        List<ExternalVolumeSync.Change> planned = volumeSync.sync(null, owner, host.getClusterId(), snapshot, true, plannedNotes);
+        ExternalVolumeSync.requireRoot(planned, plannedNotes);
         if (request.dryRun) {
-            List<String> notes = new ArrayList<>();
-            response.volumes(volumeSync.sync(null, owner, host.getClusterId(), snapshot, true, notes), notes);
+            response.volumes(planned, plannedNotes);
             return response;
         }
 
@@ -356,7 +366,7 @@ public class NativeInstanceAdoption {
             AdoptionRegistry.Identity identity = new AdoptionRegistry.Identity(claim.claimId, claim.generation, cluster, request.vmid,
                     hash, vm.getUuid(), vm.getInstanceName());
             registry.activate(identity, verifier.forAdoption(row -> {
-                ExternalVmConfiguration again = snapshot(host, cluster, request.vmid);
+                ExternalVmConfiguration again = snapshot(host, cluster, request.vmid, Math.min(IN_TRANSACTION_READ_WAIT, AgentManager.Wait.value()));
                 if (!snapshot.configDigest.equals(again.configDigest) || !snapshot.power.equals(again.power) || !snapshot.node.equals(again.node)) {
                     throw new AdoptionRegistry.Conflict("the provider instance changed during adoption; adopt it again");
                 }
@@ -364,7 +374,9 @@ public class NativeInstanceAdoption {
             }));
             account(vm, offering, template, running, imported);
             List<String> notes = new ArrayList<>();
-            response.volumes(volumeSync.sync(vm, host.getClusterId(), snapshot, false, notes), notes);
+            List<ExternalVolumeSync.Change> recorded = volumeSync.sync(vm, host.getClusterId(), snapshot, false, notes);
+            ExternalVolumeSync.requireRoot(recorded, notes);
+            response.volumes(recorded, notes);
             response.adopted(vm.getUuid(), vm.getInstanceName(), claim.claimId, claim.generation);
             return response;
         });

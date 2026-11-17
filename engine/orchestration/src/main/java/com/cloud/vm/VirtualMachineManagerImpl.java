@@ -637,12 +637,19 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         }
     }
 
+    protected boolean isExternalTemplateWithStorage(VirtualMachineTemplate template) {
+        return template.getFormat() == ImageFormat.EXTERNAL && template.getExtensionId() != null && extensionHelper != null
+                && extensionHelper.isInstanceStorageSupported(template.getExtensionId());
+    }
+
     private void allocateRootVolume(VMInstanceVO vm, VirtualMachineTemplate template, DiskOfferingInfo rootDiskOfferingInfo, Account owner, Long rootDiskSizeFinal, Volume volume, Snapshot snapshot) {
         // Create new Volume context and inject event resource type, id and details to generate VOLUME.CREATE event for the ROOT disk.
         CallContext volumeContext = CallContext.register(CallContext.current(), ApiCommandResourceType.Volume);
         try {
             String rootVolumeName = String.format("ROOT-%s", vm.getId());
-            if (template.getFormat() == ImageFormat.ISO) {
+            if (template.getFormat() == ImageFormat.ISO || isExternalTemplateWithStorage(template)) {
+                // An External extension that records instance storage gets the root volume record now, as for an
+                // ISO; the extension's create binds it to the disk it makes.
                 volumeMgr.allocateRawVolume(Type.ROOT, rootVolumeName, rootDiskOfferingInfo.getDiskOffering(), rootDiskOfferingInfo.getSize(),
                         rootDiskOfferingInfo.getMinIops(), rootDiskOfferingInfo.getMaxIops(), vm, template, owner, null, rootDiskOfferingInfo.getKmsKeyId(), true);
             } else if (Arrays.asList(ImageFormat.BAREMETAL, ImageFormat.EXTERNAL).contains(template.getFormat())) {

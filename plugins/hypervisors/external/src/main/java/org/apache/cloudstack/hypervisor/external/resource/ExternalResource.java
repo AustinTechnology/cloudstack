@@ -395,17 +395,25 @@ public class ExternalResource implements ServerResource {
                     JsonObject values = vms.getAsJsonObject(vm);
                     VmSample previous = vmSamples.get(vm);
                     if (previous != null && timestamp <= previous.timestamp) {
-                        throw new IllegalArgumentException("Non-increasing metrics timestamp");
+                        // The clock went back: this sample is a new baseline, as after a restart.
+                        previous = null;
                     }
                     VmStatsEntry stats = new VmStatsEntry();
-                    double cpus = required(values, "cpus");
-                    double cpu = required(values, "cpu_utilization");
-                    if (cpus < 1 || cpus > Integer.MAX_VALUE || cpus != Math.floor(cpus) || cpu > 100) {
-                        throw new IllegalArgumentException("Invalid CPU metrics");
+                    try {
+                        double cpus = required(values, "cpus");
+                        double cpu = required(values, "cpu_utilization");
+                        if (cpus < 1 || cpus > Integer.MAX_VALUE || cpus != Math.floor(cpus) || cpu < 0) {
+                            throw new IllegalArgumentException("Invalid CPU metrics");
+                        }
+                        stats.setNumCPUs((int) cpus);
+                        // A provider can count the whole guest process (I/O threads included) against its vCPUs.
+                        stats.setCPUUtilization(Math.min(cpu, 100));
+                        stats.setMemoryKBs(required(values, "memory_kb"));
+                    } catch (RuntimeException invalid) {
+                        // One instance's bad values do not void the others'.
+                        logger.debug("Skipping invalid metrics of instance {} on host {}: {}", vm, name, invalid.getMessage());
+                        continue;
                     }
-                    stats.setNumCPUs((int) cpus);
-                    stats.setCPUUtilization(cpu);
-                    stats.setMemoryKBs(required(values, "memory_kb"));
                     stats.setIntFreeMemoryKBs(number(values, "memory_free_kb", -1));
                     stats.setTargetMemoryKBs(number(values, "memory_target_kb", -1));
                     stats.setEntityType("vm");
@@ -425,7 +433,7 @@ public class ExternalResource implements ServerResource {
                 return new GetVmStatsAnswer(cmd, result);
             }
         } catch (Exception e) {
-            logger.debug("Could not collect External instance metrics for host {}", name);
+            logger.debug("Could not collect External instance metrics for host {}: {}", name, e.getMessage());
         }
         return new Answer(cmd, false, "Not supported");
     }

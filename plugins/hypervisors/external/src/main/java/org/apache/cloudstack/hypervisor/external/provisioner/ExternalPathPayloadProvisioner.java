@@ -185,7 +185,9 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
     private ExecutorService payloadCleanupExecutor;
     private ScheduledExecutorService payloadCleanupScheduler;
     private static final List<String> TRIVIAL_ACTIONS = Arrays.asList(
-            "status", "statuses", "getipaddress"
+            // Read-only actions that run every minute or so: their payload (with the cluster's credentials) is
+            // removed as soon as they answer instead of being kept for a day.
+            "status", "statuses", "getipaddress", "health", "hoststats", "vmstats", "liststorage"
     );
 
     // This is deliberately a status-only switch, not a lifecycle cutover.
@@ -609,6 +611,16 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                     details.put(ApiConstants.VIRTUAL_MACHINE, vmDetails);
                 }
             }
+            VMTemplateVO deployedFrom = isDeploy && vm != null ? templateDao.findByIdIncludingRemoved(vm.getTemplateId()) : null;
+            if (deployedFrom != null && deployedFrom.getFormat() == Storage.ImageFormat.EXTERNAL && volumeSync != null
+                    && host != null && host.getClusterId() != null) {
+                // The boot disk the extension creates is the root volume the instance was allocated: tell it where.
+                Map<String, Map<String, String>> details = cmd.getExternalDetails();
+                Map<String, String> vmDetails = details.get(ApiConstants.VIRTUAL_MACHINE) == null ? new HashMap<>()
+                        : new HashMap<>(details.get(ApiConstants.VIRTUAL_MACHINE));
+                vmDetails.putAll(volumeSync.templateDeployment(host.getClusterId(), vm, vmDetails.get("storage"), vmDetails.get("disk_size_gb")));
+                details.put(ApiConstants.VIRTUAL_MACHINE, vmDetails);
+            }
             Map<String, Object> accessDetails = loadAccessDetails(cmd.getExternalDetails(), virtualMachineTO);
             if (cdroms != null) {
                 accessDetails.put("cdroms", cdroms);
@@ -858,7 +870,29 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
         }
         Pair<Boolean, String> result = executeExternalCommand(ext.getName(), "health", payload, HOST_HEALTH_WAIT,
                 String.format("Failed to check the health of host %s", targetHostId == null ? via : targetHostId), extensionPath);
-        return parseHostHealth(result);
+        String health = parseHostHealth(result);
+        if (!HOST_HEALTH_UP.equals(health)) {
+            logger.info("Health of {} as seen through {}: {} ({})", targetHostId == null ? via : hostDao.findById(targetHostId), via, health, healthReason(result));
+        }
+        return health;
+    }
+
+    /** Why the extension answered other than up, bounded and without the raw answer. */
+    static String healthReason(Pair<Boolean, String> result) {
+        if (result == null || StringUtils.isBlank(result.second())) {
+            return "no answer";
+        }
+        String text = result.second().trim();
+        try {
+            JsonObject obj = JsonParser.parseString(text.substring(Math.max(0, text.indexOf('{')))).getAsJsonObject();
+            String reason = !field(obj, "reason").isEmpty() ? field(obj, "reason") : field(obj, "error");
+            if (!reason.isEmpty()) {
+                return org.apache.commons.lang3.StringUtils.abbreviate(reason.replaceAll("[^\\x20-\\x7e]", "?"), 200);
+            }
+        } catch (RuntimeException e) {
+            // below
+        }
+        return result.first() ? "unreadable answer" : org.apache.commons.lang3.StringUtils.abbreviate(text.replaceAll("[^\\x20-\\x7e]", "?"), 120);
     }
 
     static String parseHostHealth(Pair<Boolean, String> result) {
@@ -1534,6 +1568,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                         Map<String, Object> accessDetails, int wait, String errorLogPrefix, String file) {
         NativeOperation nativeOperation = null;
         Process nativeProcess = null;
+        String dataFile = null;
         try {
             Path executablePath = Paths.get(file).toAbsolutePath().normalize();
             if (!Files.isExecutable(executablePath)) {
@@ -1553,7 +1588,7 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             List<String> command = new ArrayList<>();
             command.add(executablePath.toString());
             command.add(action);
-            String dataFile = prepareExternalPayload(extensionName, payload);
+            dataFile = prepareExternalPayload(extensionName, payload);
             command.add(dataFile);
             command.add(Integer.toString(wait));
             ProcessBuilder builder = new ProcessBuilder(command);
@@ -1610,7 +1645,6 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                     nativeOperation.registry.complete(nativeOperation.identity, nativeOperation.lease.action, nativeOperation.lease.id);
                 }
             }
-            deleteExtensionPayloadFile(extensionName, action, dataFile);
             return new Pair<>(true, output.toString().trim());
 
         } catch (IOException | InterruptedException e) {
@@ -1629,6 +1663,11 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             if (nativeProcess != null) { return nativeUncertainOutcome(action); }
             abandonUnsentNativeOperation(nativeOperation);
             throw e;
+        } finally {
+            // Whatever the outcome; only the payloads of trivial read-only actions are removed here.
+            if (dataFile != null) {
+                deleteExtensionPayloadFile(extensionName, action, dataFile);
+            }
         }
     }
 

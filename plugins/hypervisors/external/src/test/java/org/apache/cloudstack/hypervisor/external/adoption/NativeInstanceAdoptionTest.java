@@ -95,6 +95,8 @@ public class NativeInstanceAdoptionTest {
         a.networkOrchestrator = mock(NetworkOrchestrationService.class); a.refreshManager = mock(ExternalVmRefreshManager.class);
         a.verifier = mock(NativeManagedAdoptionVerifier.class);
         a.volumeSync = mock(org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.class);
+        when(a.volumeSync.sync(isNull(), any(), anyLong(), any(), eq(true), any())).thenReturn(List.of(
+                new org.apache.cloudstack.hypervisor.external.storage.ExternalVolumeSync.Change("scsi0", "labnfs:105/vm-105-disk-0.qcow2", "import", "ROOT", null, 1L << 30, "Standard", false)));
         host1 = mock(HostVO.class); host2 = mock(HostVO.class); answer = mock(Answer.class); owner = mock(Account.class);
         offering = mock(ServiceOfferingVO.class); template = mock(VMTemplateVO.class); network = mock(NetworkVO.class);
         Extension extension = mock(Extension.class);
@@ -162,6 +164,20 @@ public class NativeInstanceAdoptionTest {
         when(answer.getResult()).thenReturn(false);
         when(answer.getDetails()).thenReturn("Exit code: 1, Output: {\"status\":\"error\",\"error\":\"Instance configuration has pending changes\"}");
         rejected(500, "cannot be read: Instance configuration has pending changes");
+    }
+
+    @Test public void refusesAGuestWhoseBootDiskCannotBeItsRootVolume() {
+        when(a.volumeSync.sync(isNull(), any(), anyLong(), any(), eq(true), any())).thenAnswer(call -> {
+            ((List<String>) call.getArgument(5)).add("disk scsi0 is on storage local-lvm, which is not registered; not recorded");
+            return List.of();
+        });
+        try {
+            a.adopt(request(500));
+            fail("expected rejection");
+        } catch (com.cloud.exception.InvalidParameterValueException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("cannot be recorded as its root volume: disk scsi0 is on storage local-lvm"));
+        }
+        verifyNoInteractions(a.userVmService, a.networkOrchestrator, a.verifier);
     }
 
     @Test public void refusesAGuestThatCloudStackAlreadyHolds() {

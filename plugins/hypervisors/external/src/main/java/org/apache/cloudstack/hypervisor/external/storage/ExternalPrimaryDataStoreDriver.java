@@ -219,7 +219,7 @@ public class ExternalPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     public Pair<Long, Long> getStorageStats(StoragePool storagePool) {
         try {
             StoragePoolVO pool = poolDao.findById(storagePool.getId());
-            ExternalStorageInventory.Storage storage = pool == null ? null : inventory.findAny(pool);
+            ExternalStorageInventory.Storage storage = pool == null ? null : inventory.findAnyRecent(pool);
             return storage == null ? null : new Pair<>(storage.totalBytes, storage.usedBytes);
         } catch (RuntimeException e) {
             logger.debug("No storage statistics for {}: {}", storagePool, e.getMessage());

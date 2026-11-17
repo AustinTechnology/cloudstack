@@ -192,6 +192,21 @@ public class CapacityManagerImplTest {
         capacityManager.updateCapacityForHost(external);
         org.junit.Assert.assertFalse(CapacityManagerImpl.hasReportedCapacity(external));
         when(external.getTotalMemory()).thenReturn(8L << 30);
+        org.junit.Assert.assertFalse("no CPU speed", CapacityManagerImpl.hasReportedCapacity(external));
+        when(external.getSpeed()).thenReturn(2100L);
         org.junit.Assert.assertTrue(CapacityManagerImpl.hasReportedCapacity(external));
+    }
+
+    @Test
+    public void aCapacityFailureDoesNotStopAnExternalHostConnecting() {
+        Host external = mock(Host.class);
+        when(external.getHypervisorType()).thenReturn(com.cloud.hypervisor.Hypervisor.HypervisorType.External);
+        when(external.getCpus()).thenReturn(8);
+        when(external.getSpeed()).thenReturn(2100L);
+        when(external.getTotalMemory()).thenReturn(8L << 30);
+        when(external.getId()).thenReturn(5L);
+        capacityManager._vmDao = mock(com.cloud.vm.dao.VMInstanceDao.class);
+        when(capacityManager._vmDao.listIdServiceOfferingForUpVmsByHostId(5L)).thenThrow(new NumberFormatException("null"));
+        capacityManager.updateCapacityForHost(external);
     }
 }

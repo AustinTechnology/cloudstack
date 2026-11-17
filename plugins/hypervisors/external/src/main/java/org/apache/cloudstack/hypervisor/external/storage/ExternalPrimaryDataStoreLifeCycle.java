@@ -155,6 +155,7 @@ public class ExternalPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCy
     @Override
     public boolean attachZone(DataStore dataStore, ZoneScope scope, HypervisorType hypervisorType) {
         dataStoreHelper.attachZone(dataStore, HypervisorType.External);
+        inventory.link(poolDao.findById(dataStore.getId()));
         return true;
     }
 

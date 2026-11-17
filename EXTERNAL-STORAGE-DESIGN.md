@@ -232,7 +232,6 @@ Not tested:
 Known gaps:
 
 - When an attach is refused (wrong offering, no free slot), the volume that was just created stays behind unattached, as with any failed attach. It is only a record and can be deleted.
-- A guest deployed through CloudStack still gets its root volume record at its first refresh, not at deploy.
 - The stock resize form asks for IOPS when the first disk offering in the zone has custom IOPS. A resize that carries IOPS is refused for these volumes.
 
 ## Ceph and a second cluster (lab, 15 Nov 2026)
@@ -383,3 +382,30 @@ Lab results (jar `adel-a`, extension script `42765d86`; 785 unit tests, 81 exten
 | Delete runs, answer lost | Job fails as unknown; lease kept; a second expunge is refused and sends nothing; after the operator releases the lease the next expunge finds nothing to delete and completes |
 | HA-managed adopted guest, first cluster | HA resource removed, guest destroyed; the other HA guest untouched |
 
+## Root volume records and placement (lab, 17 Nov 2026)
+
+Every External instance has a root volume record:
+
+- Deploying from an External template of an extension that records storage allocates the ROOT record at once, as
+  for an ISO (`VirtualMachineManagerImpl.allocateRootVolume`). Before the extension creates the guest,
+  `ExternalVolumeSync.templateDeployment` picks the storage: the root disk offering's External storage, else the
+  template's `storage` detail (the volume then takes that storage's offering, counted and billed as it). The size
+  is the larger of the requested root size and the template's `disk_size_gb`, in whole GiB, checked against the
+  owner's primary storage limit. It refuses, before anything is created at the provider, when the storage is not a
+  registered External storage the cluster reaches. The create binds the ROOT to the disk it made
+  (`recordCreated`); Proxmox grows a cloned boot disk that is smaller than that size and retries its read of the
+  new configuration. A record the create could not bind stays Allocated until a refresh binds it.
+- Adoption refuses a guest whose boot disk cannot be recorded as its ROOT (unregistered or unreached storage, no
+  disk offering), dry run and apply alike, with the reasons. Other disks that cannot be recorded are still only
+  reported.
+- External pools are linked (`storage_pool_host_ref`) with every host of each cluster whose storage was verified
+  to be the pool's (`externalCluster.<cluster>`), and with no other host: on host connect, at registration, and when
+  a cluster is first verified. Stock placement (including the last-host path a stopped instance takes once hosts
+  report real capacity) then checks storage access for External as for any hypervisor.
+- With hosts linked, the storage statistics task asks the driver for each pool's capacity and use every
+  `storage.stats.interval`; one provider read per cluster serves every pool for 50 s.
+
+Lab evidence: new deploys from an ISO-type template (default and 2 GiB on the Ceph offering), from a Proxmox clone
+template (112 MiB boot disk grown to 2 GiB) and from the Hyper-V template each had a Ready ROOT on the expected pool
+when the deploy returned; stop/start of each, and of an adopted guest on the second cluster, took the stock
+last-host path; a guest booting from `local` storage was refused adoption and nothing was recorded.
