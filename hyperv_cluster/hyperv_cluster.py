@@ -1018,8 +1018,13 @@ class Extension:
         ops = as_list(desc.get("ops"))
         if ops and ops[0] != "Ok":
             raise Fail("Hyper-V has an operation in progress on the VM: %s" % ", ".join(ops))
+        memory_mb = int(desc["memory"]) // (1024 * 1024)
         if desc.get("dynamic"):
-            raise Fail("The VM uses dynamic memory, which CloudStack cannot represent")
+            # Optional stand-in until such VMs are given static memory: a fixed MiB per vCPU is recorded as the size.
+            per_cpu = str(self.setting("dynamic_memory_mb_per_cpu") or "")
+            if not per_cpu.isdigit() or int(per_cpu) < 256:
+                raise Fail("The VM uses dynamic memory, which CloudStack cannot represent")
+            memory_mb = int(per_cpu) * int(desc["cpus"])
         nics_raw = as_list(desc.get("nics"))
         numbers = self.nic_numbers(nics_raw)
         nics = []
@@ -1050,7 +1055,7 @@ class Extension:
         return {"status": "success",
                 "identity": {"cluster": self.settings["cluster"], "vmid": vm["vmid"], "name": desc["name"], "node": desc["node"].lower()},
                 "power": "running" if desc["state"] == "Running" else "stopped",
-                "config_digest": self.digest(desc), "cpus": int(desc["cpus"]), "memory_mb": int(desc["memory"]) // (1024 * 1024),
+                "config_digest": self.digest(desc), "cpus": int(desc["cpus"]), "memory_mb": memory_mb,
                 "agent_available": bool(desc.get("kvp")), "nics": nics, "disks": disks}
 
     def describe(self, vm):

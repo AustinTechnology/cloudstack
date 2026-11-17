@@ -544,6 +544,15 @@ class GetConfig(Base):
             self.assertIn(word, out["error"])
             vm[change[0]] = saved
 
+    def test_dynamic_memory_recorded_per_cpu_when_configured(self):
+        vm, vmid = self.make()
+        vm["dynamic"] = True
+        p = payload(vmid=vmid)
+        p["externaldetails"]["resourcemap"]["dynamic_memory_mb_per_cpu"] = "4096"
+        rc, out = self.run_action("getconfig", p)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["memory_mb"], 4096 * vm["cpus"])
+
     def test_unrepresentable_slot_refuses(self):
         vm, vmid = self.ordinary("x", disks=[disk("SCSI", 0, 40, "C:\\ClusterStorage\\Volume1\\x.vhdx")])
         rc, out = self.run_action("getconfig", payload(vmid=vmid))
