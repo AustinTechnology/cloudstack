@@ -276,7 +276,17 @@ public final class LegacyAdoptionImport {
 
     /** Atomic whole-snapshot handover. The caller must keep every legacy writer stopped. */
     public void handover(AdoptionRegistry.VmVerifier verifier) {
+        handover(verifier, java.util.Collections.emptySet());
+    }
+
+    /**
+     * @param release managed claims the operator leaves out of native management: they are not verified and are
+     *        released in the same transaction. Their CloudStack instances stay recorded but every native operation on
+     *        them is refused (no managed claim), so nothing reaches their guests.
+     */
+    public void handover(AdoptionRegistry.VmVerifier verifier, Set<String> release) {
         if (verifier == null) { throw new IllegalArgumentException("verifier required"); }
+        final Set<String> leftOut = release == null ? java.util.Collections.emptySet() : release;
         AdoptionRegistry.transaction(c -> {
             try (PreparedStatement s=c.prepareStatement("SELECT legacy_fenced FROM external_adoption_control WHERE id=1 FOR UPDATE"); ResultSet r=s.executeQuery()) {
                 if (!r.next() || !r.getBoolean(1)) { throw new AdoptionRegistry.Conflict("legacy fence is not held"); }
@@ -303,6 +313,7 @@ public final class LegacyAdoptionImport {
             }
             // Every instance is checked, so one run names all that have to be fixed.
             java.util.List<String> failed = new java.util.ArrayList<>();
+            Set<String> toRelease = new HashSet<>();
             try (PreparedStatement s=c.prepareStatement("SELECT id,generation,proxmox_cluster,proxmox_vmid,manifest_sha256,cloudstack_vm_ref,cloudstack_instance_name,state,operation_lease_id,migration_fenced,proxmox_node,manifest_json FROM external_adoption_claims ORDER BY proxmox_cluster,proxmox_vmid FOR UPDATE"); ResultSet r=s.executeQuery()) {
                 while (r.next()) {
                     String state=r.getString(8);
@@ -312,7 +323,9 @@ public final class LegacyAdoptionImport {
                     AdoptionRegistry.canonicalUuid(id);
                     if (generation<=0) { throw new AdoptionRegistry.Conflict("invalid retained generation"); }
                     AdoptionRegistry.manifest(json,hash,cluster,node,vmid);
-                    if ("managed".equals(state)) {
+                    if ("managed".equals(state) && leftOut.contains(id)) {
+                        toRelease.add(id);
+                    } else if ("managed".equals(state)) {
                         AdoptionRegistry.Identity identity=new AdoptionRegistry.Identity(id,generation,cluster,vmid,hash,r.getString(6),r.getString(7));
                         try { verifier.verify(identity,node,json); }
                         catch (AdoptionRegistry.Conflict e) { failed.add(cluster + " VMID " + vmid + " (" + identity.instanceName + "): " + e.getMessage()); }
@@ -323,6 +336,16 @@ public final class LegacyAdoptionImport {
                 int shown = Math.min(failed.size(), 25);
                 throw new AdoptionRegistry.Conflict(failed.size() + " instance(s) failed verification: " + String.join("; ", failed.subList(0, shown))
                         + (failed.size() > shown ? "; and " + (failed.size() - shown) + " more" : ""));
+            }
+            if (!toRelease.equals(leftOut)) {
+                Set<String> unknown = new HashSet<>(leftOut); unknown.removeAll(toRelease);
+                throw new AdoptionRegistry.Conflict("claims to leave out are not managed claims: " + unknown);
+            }
+            for (String id : toRelease) {
+                try (PreparedStatement s=c.prepareStatement("UPDATE external_adoption_claims SET state='released',updated_at=SYSDATE(6) WHERE id=? AND state='managed' AND operation_lease_id IS NULL AND migration_fenced=TRUE")) {
+                    s.setString(1, id);
+                    if (s.executeUpdate()!=1) { throw new AdoptionRegistry.Conflict("claim to leave out changed: " + id); }
+                }
             }
             try (PreparedStatement s=c.prepareStatement("UPDATE external_adoption_claims SET migration_fenced=FALSE WHERE migration_fenced=TRUE")) { s.executeUpdate(); }
             try (PreparedStatement s=c.prepareStatement("UPDATE external_adoption_control SET legacy_fenced=FALSE WHERE id=1 AND legacy_fenced=TRUE")) {
@@ -383,8 +406,20 @@ public final class LegacyAdoptionImport {
             else if (col.equals("generation") || col.equals("proxmox_vmid") || col.equals("attempt_count") || (col.equals("id") && authority)) {
                 expected=value.intValue(); int n=r.getInt(j+1); actual=r.wasNull() ? null : n;
             } else { expected=value.textValue(); actual=r.getString(j+1); }
-            if (!java.util.Objects.equals(expected,actual)) { throw new AdoptionRegistry.Conflict("legacy typed identity changed: " + col); }
+            if (!java.util.Objects.equals(expected,actual) && !(col.endsWith("_at") && storedWithoutFraction((Timestamp) expected, (Timestamp) actual))) {
+                throw new AdoptionRegistry.Conflict("legacy typed identity changed: " + col);
+            }
         }
+    }
+
+    /**
+     * MySQL Connector/J sends no fractional seconds to a server whose handshake version is below 5.6.4, which
+     * MariaDB before 11 reports ("5.5.5-10.x"). The database then holds the legacy time to the whole second: that is
+     * the same time, not a changed one.
+     */
+    static boolean storedWithoutFraction(Timestamp expected, Timestamp actual) {
+        return expected != null && actual != null && actual.getNanos() == 0
+                && Math.floorDiv(expected.getTime(), 1000L) * 1000L == actual.getTime();
     }
 
     private static void insertClaim(Connection c, JsonNode row) throws SQLException {

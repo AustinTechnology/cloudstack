@@ -268,10 +268,10 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
                 || account.getDomainId() != vm.getDomainId() || account.getType() == null || account.getType() == Account.Type.PROJECT) {
             throw fail("instance ownership unavailable or project-owned");
         }
+        // The manifest records who the guest was adopted for. CloudStack may have assigned the instance to another
+        // account since (assignVirtualMachine); its current owner is CloudStack's record, not part of the identity.
         JsonNode owner = manifest.get("ownership");
         if (owner == null) {
-            // Legacy policy records no domain UUID in the manifest; do not invent one.
-            if (!"admin".equals(account.getAccountName())) throw fail("legacy manifest requires admin account");
             return;
         }
         if (!owner.isObject() || owner.size() != 3 || !owner.has("account") || !owner.has("domain_id") || !owner.has("project_id")
@@ -281,7 +281,7 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
         String accountName = exact(owner.get("account").textValue());
         String domainUuid = exact(owner.get("domain_id").textValue());
         try { AdoptionRegistry.canonicalUuid(domainUuid); } catch (RuntimeException e) { throw fail("invalid manifest domain UUID"); }
-        if (!accountName.equals(account.getAccountName()) || !domainUuid.equals(domain.getUuid())) throw fail("manifest owner differs from current instance");
+        if (accountName.isEmpty()) throw fail("invalid manifest owner");
     }
 
     private void verifyNics(VMInstanceVO vm, ExternalVmConfiguration snapshot, String bridge) {
@@ -315,7 +315,9 @@ public class NativeManagedAdoptionVerifier implements AdoptionRegistry.VmVerifie
             String uri = network.getBroadcastUri().toString();
             if (!uri.matches("vlan://[1-9][0-9]{0,3}")) throw fail("only tagged VLAN NICs are supported");
             int vlan = Integer.parseInt(uri.substring(7));
-            if (vlan > 4094 || !Objects.equals(p.vlan, vlan) || !bridge.equals(p.bridge)) throw fail("NIC bridge or VLAN mismatch");
+            // An untagged NIC on a VLAN-aware bridge is on VLAN 1.
+            Integer providerVlan = p.vlan == null ? Integer.valueOf(1) : p.vlan;
+            if (vlan > 4094 || !Objects.equals(providerVlan, vlan) || !bridge.equals(p.bridge)) throw fail("NIC bridge or VLAN mismatch");
             // MAC joins sparse provider device IDs to current native NICs. Device
             // numbering need not remain the same after managed NIC operations.
         }

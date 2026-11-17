@@ -86,4 +86,13 @@ public class LegacyAdoptionImportTest {
         ((ObjectNode) root.get("adoption_write_authority").get(0)).put("mode", "operator");
         refused(root, "write authority is held");
     }
+
+    @org.junit.Test
+    public void aTimeStoredToTheWholeSecondIsTheSameTime() {
+        java.sql.Timestamp legacy = java.sql.Timestamp.valueOf("2026-11-08 08:58:34.565281");
+        org.junit.Assert.assertTrue(LegacyAdoptionImport.storedWithoutFraction(legacy, java.sql.Timestamp.valueOf("2026-11-08 08:58:34")));
+        org.junit.Assert.assertFalse(LegacyAdoptionImport.storedWithoutFraction(legacy, java.sql.Timestamp.valueOf("2026-11-08 08:58:35")));
+        org.junit.Assert.assertFalse(LegacyAdoptionImport.storedWithoutFraction(legacy, java.sql.Timestamp.valueOf("2026-11-08 08:58:34.5")));
+        org.junit.Assert.assertFalse(LegacyAdoptionImport.storedWithoutFraction(legacy, null));
+    }
 }

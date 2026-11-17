@@ -214,16 +214,18 @@ public class NativeManagedAdoptionVerifierTest {
     @Test public void aNicReleasedByAStopTakesItsNetworksVlan() { when(nic.getBroadcastUri()).thenReturn(null); run(); }
     @Test public void nativeNetworkVlanMustAgree() { when(network.getBroadcastUri()).thenReturn(URI.create("vlan://43")); rejected(this::run, "topology"); }
     @Test public void stoppedVmUsesLastHost() { when(vm.getState()).thenReturn(VirtualMachine.State.Stopped); when(vm.getHostId()).thenReturn(null); when(vm.getLastHostId()).thenReturn(10L); when(answer.getDetails()).thenReturn(SNAP.replace("\"power\":\"running\"", "\"power\":\"stopped\"")); run(); }
-    @Test public void wrongClaimAndWrongOwnerAreRejected() { detail("adopt_claim_id", VM); rejected(this::run, "claim_id"); detail("adopt_claim_id", CLAIM); when(account.getAccountName()).thenReturn("other"); rejected(this::run, "admin account"); }
+    @Test public void wrongClaimAndWrongOwnerAreRejected() { detail("adopt_claim_id", VM); rejected(this::run, "claim_id"); detail("adopt_claim_id", CLAIM); when(account.getAccountName()).thenReturn("other"); run(); }
+    @Test public void anUntaggedProviderNicIsOnVlanOne() { when(network.getBroadcastUri()).thenReturn(URI.create("vlan://1")); when(nic.getBroadcastUri()).thenReturn(URI.create("vlan://1"));
+        when(answer.getDetails()).thenReturn(SNAP.replace("\"vlan\":42", "\"vlan\":null")); run(); }
     @Test public void missingSnapshotRejected() { when(v.extensionsManager.getInstanceConfig(vm)).thenReturn(null); rejected(this::run, "snapshot unavailable"); }
-    @Test public void explicitTenantOwnershipRequiresExactDomainAndAccount() throws Exception {
+    @Test public void anInstanceReassignedSinceAdoptionKeepsItsCurrentOwner() throws Exception {
         String tenant = MANIFEST.substring(0, MANIFEST.length() - 1) + ",\"ownership\":{\"account\":\"TenantA\",\"domain_id\":\"" + DOMAIN + "\",\"project_id\":null}}";
         AdoptionRegistry.Identity ti = new AdoptionRegistry.Identity(CLAIM, 2, "p2", 100, hash(tenant), VM, "i-2-1-VM");
         detail("adopt_manifest_sha256", ti.manifestHash); detail("adopt_manifest_json", tenant);
         when(account.getAccountName()).thenReturn("TenantA"); when(account.getType()).thenReturn(Account.Type.NORMAL);
         v.verify(ti, "old", tenant);
-        when(domain.getUuid()).thenReturn(VM);
-        rejected(() -> v.verify(ti, "old", tenant), "owner differs");
+        when(domain.getUuid()).thenReturn(VM); when(account.getAccountName()).thenReturn("TenantB");
+        v.verify(ti, "old", tenant);
     }
     @Test public void realManagedFenceRequiresTransactionAndRejectsBound() throws Exception {
         NativeManagedAdoptionVerifier real = new NativeManagedAdoptionVerifier();

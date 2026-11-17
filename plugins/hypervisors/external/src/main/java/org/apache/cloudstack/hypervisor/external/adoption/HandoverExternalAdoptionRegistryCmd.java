@@ -28,9 +28,13 @@ import com.cloud.user.Account;
 public class HandoverExternalAdoptionRegistryCmd extends BaseCmd {
     @Inject ExternalAdoptionManager manager;
 
+    @org.apache.cloudstack.api.Parameter(name = "releaseclaimids", type = CommandType.STRING, length = 4096,
+            description = "Comma-separated managed claim IDs to leave out of native management: released without verification")
+    private String releaseClaimIds;
+
     @Override public long getEntityOwnerId() { return Account.ACCOUNT_ID_SYSTEM; }
     @Override public void execute() {
-        ExternalAdoptionRegistryResponse response = manager.handover();
+        ExternalAdoptionRegistryResponse response = manager.handover(releaseClaimIds);
         response.setResponseName(getCommandName());
         setResponseObject(response);
     }

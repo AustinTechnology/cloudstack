@@ -102,9 +102,20 @@ public class ExternalAdoptionManager extends ManagerBase implements PluggableSer
 
     /** Verifies every imported managed claim against the live instance, then clears the fence. */
     public ExternalAdoptionRegistryResponse handover() {
+        return handover(null);
+    }
+
+    /** @param releaseClaimIds comma-separated managed claims to leave out of native management (released, not verified) */
+    public ExternalAdoptionRegistryResponse handover(String releaseClaimIds) {
         requireRootAdmin();
+        java.util.Set<String> release = new java.util.HashSet<>();
+        if (releaseClaimIds != null) {
+            for (String id : releaseClaimIds.split(",")) {
+                if (!id.trim().isEmpty()) release.add(AdoptionRegistry.canonicalUuid(id.trim()));
+            }
+        }
         try {
-            importer().handover(verifier);
+            importer().handover(verifier, release);
         } catch (IllegalArgumentException | AdoptionRegistry.Conflict e) {
             throw new InvalidParameterValueException("Legacy adoption handover rejected: " + e.getMessage());
         }
