@@ -348,18 +348,22 @@ public class ExternalVmRefreshManager extends ManagerBase implements PluggableSe
     }
 
     public NetworkVO importNetwork(Account owner, long zoneId, ExternalVmConfiguration.Nic nic, String bridge) {
-        if (bridge == null || nic.vlan == null || !bridge.equals(nic.bridge)) return null;
-        String uri = "vlan://" + nic.vlan;
-        NetworkVO match = null;
+        if (bridge == null || !bridge.equals(nic.bridge)) return null;
+        // An untagged NIC on a VLAN-aware bridge or switch port is on VLAN 1.
+        String uri = "vlan://" + (nic.vlan == null ? 1 : nic.vlan);
+        NetworkVO usable = null, owned = null;
+        int usableCount = 0, ownedCount = 0;
         for (NetworkVO network : networkDao.listByZoneAndUriAndGuestType(zoneId, uri, Network.GuestType.L2)) {
             if (network.getRemoved() != null || network.getTrafficType() != TrafficType.Guest
                     || network.getBroadcastUri() == null || !uri.equals(network.getBroadcastUri().toString())) continue;
             try { accountService.checkAccess(owner, AccessType.UseEntry, false, network); }
             catch (RuntimeException denied) { continue; }
-            if (match != null) return null;
-            match = network;
+            usable = network; usableCount++;
+            // An administrator may use every account's network of that VLAN: the owner's own network is the one.
+            if (owner != null && network.getAccountId() == owner.getId()) { owned = network; ownedCount++; }
         }
-        return match;
+        if (ownedCount == 1) return owned;
+        return ownedCount == 0 && usableCount == 1 ? usable : null;
     }
 
     protected boolean countsRunningOnly() {
