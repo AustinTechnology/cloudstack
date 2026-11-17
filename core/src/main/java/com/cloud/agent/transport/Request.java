@@ -450,12 +450,37 @@ public class Request {
         buf.append(", Flags: ").append(Integer.toBinaryString(getFlags())).append(", ");
         String cleanContent = content.toString();
         if(cleanContent.contains("password")) {
-            buf.append(cleanPassword(cleanContent));
-        } else {
-            buf.append(content);
+            cleanContent = cleanPassword(cleanContent);
         }
+        buf.append(maskSecrets(cleanContent));
         buf.append(" }");
         return buf.toString();
+    }
+
+    /** JSON string values whose key names a credential: passwords, secrets, private, access and API keys. */
+    private static final java.util.regex.Pattern SECRET_VALUE = java.util.regex.Pattern.compile(
+            "(\"[A-Za-z0-9_.\\-]*(?i:password|passwd|secret|private_?key|access_?key|api_?key)[A-Za-z0-9_.\\-]*\"\\s*:\\s*\")((?:[^\"\\\\]|\\\\.)*)\"");
+
+    /**
+     * Masks credential values in a logged command, keeping enough to tell which credential it was: the first and
+     * last four characters of a value of 16 or more, the first and last two of 8 to 15, nothing of a shorter one.
+     */
+    public static String maskSecrets(String logString) {
+        if (logString == null) {
+            return null;
+        }
+        java.util.regex.Matcher m = SECRET_VALUE.matcher(logString);
+        StringBuffer out = new StringBuffer();
+        while (m.find()) {
+            m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(m.group(1) + maskValue(m.group(2)) + "\""));
+        }
+        m.appendTail(out);
+        return out.toString();
+    }
+
+    static String maskValue(String value) {
+        int keep = value.length() >= 16 ? 4 : value.length() >= 8 ? 2 : 0;
+        return keep == 0 ? "***" : value.substring(0, keep) + "***" + value.substring(value.length() - keep);
     }
 
     public static String cleanPassword(String logString) {
