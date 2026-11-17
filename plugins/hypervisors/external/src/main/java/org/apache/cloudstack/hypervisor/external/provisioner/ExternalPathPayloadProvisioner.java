@@ -1405,6 +1405,11 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
                         .sorted(Comparator.reverseOrder())
                         .map(Path::toFile)
                         .forEach(File::delete);
+            } catch (java.io.UncheckedIOException e) {
+                // A payload an action removed itself while the directory was being read; the next pass goes on.
+                if (!(e.getCause() instanceof java.nio.file.NoSuchFileException)) {
+                    throw e;
+                }
             }
         } catch (IOException e) {
             logger.warn("Failed to clean up extension payloads for {}: {}", extensionName, e.getMessage());
