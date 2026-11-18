@@ -67,7 +67,7 @@
           @confirm="removeNIC(record.nic)"
           :okText="$t('label.yes')"
           :cancelText="$t('label.no')"
-          v-if="!record.nic.isdefault && (resource.hypervisor !== 'External' || (externalNicChangesAllowed && record.nic.type === 'L2'))"
+          v-if="!record.nic.isdefault && (resource.hypervisor !== 'External' || externalNicChangesAllowed)"
         >
           <tooltip-button
             tooltipPlacement="bottom"

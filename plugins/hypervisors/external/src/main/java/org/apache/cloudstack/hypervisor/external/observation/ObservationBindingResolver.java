@@ -9,6 +9,12 @@ public interface ObservationBindingResolver {
     Binding current(long cloudStackVmId, String exactMac);
     Binding source(long clusterId, long hostId, int vmid, String exactMac);
 
+    /** As source, for one batch: a resolver may read each instance's provider configuration once and share it between
+     * that instance's NICs. The cache belongs to the caller and lives only for the batch. */
+    default Binding source(long clusterId, long hostId, int vmid, String exactMac, java.util.Map<Long, Object> batchCache) {
+        return source(clusterId, hostId, vmid, exactMac);
+    }
+
     final class Binding {
         public final long cloudStackVmId, clusterId, hostId;
         public final int vmid;

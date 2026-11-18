@@ -64,6 +64,12 @@ public class NativeObservationBindingResolverTest {
         ObservationBindingResolver.Binding b=r.source(2,3,100,"02:00:00:00:00:01"); assertNotNull(b);
         assertEquals(b.fingerprint,r.current(7,"02:00:00:00:00:01").fingerprint);
         assertNull(r.source(2,4,100,"02:00:00:00:00:01"));
+        // A batch reads each instance's provider configuration once, and the binding is the same as without the cache.
+        Map<Long,Object> batch=new java.util.HashMap<>();
+        clearInvocations(r.extensionsManager);
+        assertEquals(b.fingerprint,r.source(2,3,100,"02:00:00:00:00:01",batch).fingerprint);
+        assertEquals(b.fingerprint,r.source(2,3,100,"02:00:00:00:00:01",batch).fingerprint);
+        verify(r.extensionsManager,times(1)).getInstanceConfig(vm);
         // A NIC released by a stop has no broadcast URI of its own; its network's stands. One that disagrees does not.
         when(nic.getBroadcastUri()).thenReturn(null); assertNotNull(r.current(7,"02:00:00:00:00:01"));
         r.networkUri = "vlan://101"; assertNull(r.current(7,"02:00:00:00:00:01"));

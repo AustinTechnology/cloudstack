@@ -1563,7 +1563,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
         // Perform permission check on VM
         _accountMgr.checkAccess(caller, null, true, vmInstance);
-        validateExternalNicChange(vmInstance, network);
+        validateExternalNicChange(vmInstance, network, false);
         if (HypervisorType.External.equals(vmInstance.getHypervisorType()) && MapUtils.isNotEmpty(cmd.getDhcpOptionsMap())) {
             throw new InvalidParameterValueException("External NIC changes do not support DHCP options.");
         }
@@ -1626,16 +1626,23 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         return _vmDao.findById(vmInstance.getId());
     }
 
-    protected void validateExternalNicChange(UserVmVO vm, Network network) {
+    /**
+     * @param removal a removal takes away the device that matches the NIC's MAC, so it is allowed on any VLAN-tagged guest
+     *        network. An addition is limited to tagged L2: on an Isolated or Shared network it would also need an address
+     *        from CloudStack and the network's DHCP, which External NIC changes do not set up.
+     */
+    protected void validateExternalNicChange(UserVmVO vm, Network network, boolean removal) {
         if (!HypervisorType.External.equals(vm.getHypervisorType())) {
             return;
         }
         if (vm.getState() != State.Stopped && vm.getState() != State.Running) {
             throw new InvalidParameterValueException("External NIC changes require a stopped or running instance.");
         }
-        if (network.getGuestType() != Network.GuestType.L2 || network.getBroadcastUri() == null
-                || !"vlan".equals(network.getBroadcastUri().getScheme())) {
-            throw new InvalidParameterValueException("External NIC changes currently support tagged L2 networks only.");
+        if (network.getBroadcastUri() == null || !"vlan".equals(network.getBroadcastUri().getScheme())) {
+            throw new InvalidParameterValueException("External NIC changes support VLAN-tagged networks only.");
+        }
+        if (!removal && network.getGuestType() != Network.GuestType.L2) {
+            throw new InvalidParameterValueException("External NICs can be added on tagged L2 networks only; they can be removed from any tagged network.");
         }
         Long hostId = vm.getState() == State.Running ? vm.getHostId() :
                 (vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId());
@@ -1792,7 +1799,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
             throw new InvalidParameterValueException(String.format("Zone %s, has a NetworkType of Basic. Can't remove a NIC from a VM on a Basic Network", dc));
         }
 
-        validateExternalNicChange(vmInstance, network);
+        validateExternalNicChange(vmInstance, network, true);
 
         // check to see if nic is attached to VM
         if (nic.getInstanceId() != vmId) {

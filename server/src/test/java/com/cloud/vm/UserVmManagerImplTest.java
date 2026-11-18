@@ -689,7 +689,7 @@ public class UserVmManagerImplTest {
         when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
         when(userVmVoMock.getState()).thenReturn(VirtualMachine.State.Starting);
         assertThrows(InvalidParameterValueException.class,
-                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, null));
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, null, false));
     }
 
     @Test
@@ -706,33 +706,45 @@ public class UserVmManagerImplTest {
         when(network.getGuestType()).thenReturn(Network.GuestType.L2);
         when(network.getBroadcastUri()).thenReturn(java.net.URI.create("vlan://101"));
         assertThrows(InvalidParameterValueException.class,
-                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network));
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, false));
         when(extensionHelper.isInstanceNicHotplugSupported(4L)).thenReturn(true);
-        userVmManagerImpl.validateExternalNicChange(userVmVoMock, network);
+        userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, false);
         when(extensionHelper.isInstanceNicHotplugSupported(4L)).thenReturn(false);
         assertThrows(InvalidParameterValueException.class,
-                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network));
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, false));
         when(userVmVoMock.getState()).thenReturn(VirtualMachine.State.Stopped);
-        userVmManagerImpl.validateExternalNicChange(userVmVoMock, network);
+        userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, false);
         when(extensionHelper.isInstanceNicChangeSupported(4L)).thenReturn(false);
         assertThrows(InvalidParameterValueException.class,
-                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network));
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, false));
     }
 
     @Test
-    public void externalNicChangeRejectsUnsupportedNetwork() {
+    public void externalNicAddNeedsTaggedL2ButRemovalAcceptsAnyTaggedNetwork() {
         when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
         when(userVmVoMock.getState()).thenReturn(VirtualMachine.State.Stopped);
+        when(userVmVoMock.getHostId()).thenReturn(null);
+        when(userVmVoMock.getLastHostId()).thenReturn(12L);
+        HostVO host = mock(HostVO.class);
+        when(hostDao.findById(12L)).thenReturn(host);
+        when(host.getClusterId()).thenReturn(3L);
+        when(extensionHelper.getExtensionIdForCluster(3L)).thenReturn(4L);
+        when(extensionHelper.isInstanceNicChangeSupported(4L)).thenReturn(true);
         Network network = mock(Network.class);
         when(network.getGuestType()).thenReturn(Network.GuestType.Isolated);
+        when(network.getBroadcastUri()).thenReturn(java.net.URI.create("vlan://1076"));
         assertThrows(InvalidParameterValueException.class,
-                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network));
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, false));
+        userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, true);
+        when(network.getBroadcastUri()).thenReturn(java.net.URI.create("vxlan://1076"));
+        assertThrows(InvalidParameterValueException.class,
+                () -> userVmManagerImpl.validateExternalNicChange(userVmVoMock, network, true));
     }
 
     @Test
     public void externalNicGateDoesNotChangeNativeHypervisors() {
         when(userVmVoMock.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.KVM);
-        userVmManagerImpl.validateExternalNicChange(userVmVoMock, null);
+        userVmManagerImpl.validateExternalNicChange(userVmVoMock, null, false);
     }
 
     @Test

@@ -107,10 +107,14 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
         return found;
     }
     @Override public Binding source(long clusterId, long hostId, int vmid, String mac) {
+        return source(clusterId, hostId, vmid, mac, null);
+    }
+
+    @Override public Binding source(long clusterId, long hostId, int vmid, String mac, Map<Long, Object> batchCache) {
         try {
             Long id = uniqueVm(clusterId, vmid);
             if (id == null) return null;
-            Binding b = current(id, mac);
+            Binding b = current(id, mac, batchCache);
             return b != null && b.clusterId == clusterId && b.hostId == hostId && b.vmid == vmid ? b : null;
         } catch (Exception e) { return null; }
     }
@@ -131,6 +135,23 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
     }
 
     @Override public Binding current(long id, String mac) {
+        return current(id, mac, null);
+    }
+
+    /** The provider read, shared between the NICs of one instance when a batch cache is given. */
+    private ExternalVmConfiguration providerSnapshot(VMInstanceVO vm, Map<Long, Object> batchCache) {
+        Object cached = batchCache == null ? null : batchCache.get(vm.getId());
+        if (cached != null) return cached instanceof ExternalVmConfiguration ? (ExternalVmConfiguration) cached : null;
+        ExternalVmConfiguration snap = null;
+        try {
+            Answer answer = extensionsManager.getInstanceConfig(vm);
+            if (answer != null && answer.getResult()) snap = ExternalVmConfiguration.parse(answer.getDetails());
+        } catch (RuntimeException e) { snap = null; }
+        if (batchCache != null) batchCache.put(vm.getId(), snap == null ? Boolean.FALSE : snap);
+        return snap;
+    }
+
+    Binding current(long id, String mac, Map<Long, Object> batchCache) {
         try {
             mac = ObservationValidation.mac(mac);
             VMInstanceVO vm = vmDao.findById(id);
@@ -169,9 +190,8 @@ public class NativeObservationBindingResolver implements ObservationBindingResol
             int vlan = Integer.parseInt(uri.substring(7));
             if (vlan < 1 || vlan > 4094) return null;
             String nicUuid = exact(selected.getUuid()), network = networkUuid(selected.getNetworkId(), uri);
-            Answer answer = extensionsManager.getInstanceConfig(vm);
-            if (answer == null || !answer.getResult()) return null;
-            ExternalVmConfiguration snap = ExternalVmConfiguration.parse(answer.getDetails());
+            ExternalVmConfiguration snap = providerSnapshot(vm, batchCache);
+            if (snap == null) return null;
             snap.requireIdentity(cluster, vmidText);
             if (!node.equals(snap.node) || !providerName.equals(snap.name)) return null;
             ExternalVmConfiguration.Nic providerNic = null;

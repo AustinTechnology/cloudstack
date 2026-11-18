@@ -90,21 +90,34 @@ public class ExternalObservationService extends ManagerBase implements Pluggable
         try { capture = UUID.fromString(captureId); } catch (RuntimeException e) { throw new IllegalArgumentException("invalid capture ID"); }
         if (!capture.toString().equals(captureId)) { throw new IllegalArgumentException("invalid capture ID"); }
         List<Row> rows = parse(payload); // validate the complete batch before writing
+        // Bindings are resolved before the transaction. Each needs a provider read, which on a busy node takes seconds;
+        // made inside the transaction they held its locks for minutes. One provider read per instance serves all its NICs.
+        // An observation stores the fingerprint of the binding it was seen under, and its only reader (fallbackCandidate)
+        // uses it only while a fresh binding still has that fingerprint, so a binding that changes after this read
+        // leaves the observation unused rather than wrong.
+        Long senderCluster = senderCluster(userId, hostId);
+        if (senderCluster == null) { throw new SecurityException("sender is not mapped to host and cluster"); }
+        java.util.Map<Long, Object> batchCache = new java.util.HashMap<>();
+        java.util.Map<Row, ObservationBindingResolver.Binding> bindings = new java.util.LinkedHashMap<>();
+        for (Row row : rows) {
+            ObservationBindingResolver.Binding b = bindingResolver.source(senderCluster, hostId, row.vmid, row.mac, batchCache);
+            if (b != null) bindings.put(row, b);
+        }
         TransactionLegacy txn = TransactionLegacy.open("externalIpObservationSubmit");
         boolean started = false;
         try {
             Connection c = txn.getConnection();
-            // Repeated native lookups must not reuse a REPEATABLE READ snapshot.
-            // This affects only the next transaction, not the pooled session default.
             if (!c.getAutoCommit()) throw new SQLException("observation submit requires its own transaction");
             try (PreparedStatement ps = c.prepareStatement("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")) { ps.execute(); }
             txn.start();
             started = true;
             long clusterId;
-            try (PreparedStatement ps = c.prepareStatement("SELECT s.cluster_id FROM external_observation_sender s JOIN host h ON h.id=s.host_id AND h.cluster_id=s.cluster_id WHERE s.user_id=? AND s.host_id=? AND h.removed IS NULL AND h.hypervisor_type='External' FOR UPDATE")) {
+            // Only the sender row is locked: a locking join would also lock the host row, which status and capacity
+            // updates of the host need.
+            try (PreparedStatement ps = c.prepareStatement("SELECT cluster_id FROM external_observation_sender WHERE user_id=? AND host_id=? FOR UPDATE")) {
                 ps.setLong(1, userId); ps.setLong(2, hostId);
                 try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) { throw new SecurityException("sender is not mapped to host and cluster"); }
+                    if (!rs.next() || rs.getLong(1) != senderCluster) { throw new SecurityException("sender is not mapped to host and cluster"); }
                     clusterId = rs.getLong(1);
                 }
             }
@@ -115,9 +128,9 @@ public class ExternalObservationService extends ManagerBase implements Pluggable
                     throw e;
                 }
             }
-            for (Row row : rows) {
-                ObservationBindingResolver.Binding b = bindingResolver.source(clusterId, hostId, row.vmid, row.mac);
-                if (b == null) continue;
+            for (java.util.Map.Entry<Row, ObservationBindingResolver.Binding> e : bindings.entrySet()) {
+                Row row = e.getKey();
+                ObservationBindingResolver.Binding b = e.getValue();
                 // Upsert locks the key even if two management servers see it for the first time.
                 try (PreparedStatement ps = c.prepareStatement("INSERT INTO external_ip_observation(cluster_id,vmid,mac,host_id,ip,sightings,seen_at,binding_fingerprint) VALUES(?,?,?,?,NULL,0,SYSDATE(6),?) ON DUPLICATE KEY UPDATE vmid=vmid")) {
                     ps.setLong(1, clusterId); ps.setInt(2, row.vmid); ps.setString(3, row.mac); ps.setLong(4, hostId); ps.setString(5, b.fingerprint); ps.executeUpdate();
@@ -130,8 +143,6 @@ public class ExternalObservationService extends ManagerBase implements Pluggable
                         sightings = ObservationSightings.advance(row.ip, hostId, rs.getLong(1), rs.getString(2), rs.getInt(3), rs.getBoolean(4) && b.fingerprint.equals(rs.getString(5)));
                     }
                 }
-                ObservationBindingResolver.Binding after = bindingResolver.source(clusterId, hostId, row.vmid, row.mac);
-                if (after == null || !b.fingerprint.equals(after.fingerprint)) continue;
                 try (PreparedStatement ps = c.prepareStatement("UPDATE external_ip_observation SET previous_seen_at=IF(? >= 2,seen_at,NULL),host_id=?,ip=?,sightings=?,seen_at=SYSDATE(6),binding_fingerprint=? WHERE cluster_id=? AND vmid=? AND mac=?")) {
                     ps.setInt(1, sightings); ps.setLong(2, hostId); ps.setString(3, row.ip); ps.setInt(4, sightings); ps.setString(5, b.fingerprint);
                     ps.setLong(6, clusterId); ps.setInt(7, row.vmid); ps.setString(8, row.mac); ps.executeUpdate();
@@ -142,6 +153,15 @@ public class ExternalObservationService extends ManagerBase implements Pluggable
             if (started) txn.rollback();
             throw e;
         } finally { txn.close(); }
+    }
+
+    /** The sender's cluster, read without locks. Null when the sender is not mapped to this live External host. */
+    Long senderCluster(long userId, long hostId) throws SQLException {
+        TransactionLegacy t = TransactionLegacy.open("externalIpObservationSender");
+        try (PreparedStatement ps = t.getConnection().prepareStatement("SELECT s.cluster_id FROM external_observation_sender s JOIN host h ON h.id=s.host_id AND h.cluster_id=s.cluster_id WHERE s.user_id=? AND s.host_id=? AND h.removed IS NULL AND h.hypervisor_type='External'")) {
+            ps.setLong(1, userId); ps.setLong(2, hostId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getLong(1) : null; }
+        } finally { t.close(); }
     }
 
     /** Returns only a fallback candidate. Null is not an instruction to clear any IP.
