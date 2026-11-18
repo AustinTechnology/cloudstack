@@ -140,7 +140,7 @@ class Helper:
             # graphics pipeline on (FreeRDP 3.32 against Windows Server 2025), hence -gfx.
             rdp = self.launch([self.c["xfreerdp"], "/v:%s:%d" % (node, self.c["rdp_port"]), "/vmconnect:" + vm,
                                "/u:" + user, "/d:" + domain, "/from-stdin:force", "/sec:nla", "-gfx",
-                               "/cert:" + self.c["rdp_certificate"], "/f", "-decorations",
+                               "/cert:" + self.c["rdp_certificate"], "/f", "-decorations", "/smart-sizing",
                                "/size:%dx%d" % (self.c["width"], self.c["height"]), "/log-level:ERROR"],
                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
             session.procs.append(rdp)
