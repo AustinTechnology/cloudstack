@@ -144,12 +144,21 @@ public class ExternalServerPlanner extends AdapterBase implements DeploymentPlan
         clusterIds = clusterIds.stream()
                 .filter(extensionClusterIds::contains)
                 .collect(Collectors.toList());
+        // As every planner: a destination named in the plan (a host, cluster or pod chosen at deployment) bounds the search.
+        if (plan.getClusterId() != null) {
+            clusterIds.retainAll(List.of(plan.getClusterId()));
+        } else if (plan.getPodId() != null) {
+            clusterIds.removeIf(clusterId -> !plan.getPodId().equals(clusterDao.findById(clusterId).getPodId()));
+        }
         logger.debug("Found {} clusters associated with {}", clusterIds.size(), fromIso ? "extensions that create from an ISO" : extensionVO);
         HostVO target = null;
         List<HostVO> hosts;
         for (Long clusterId : clusterIds) {
             hosts = resourceMgr.listAllUpAndEnabledHosts(Host.Type.Routing, clusterId, null,
                     vm.getDataCenterId());
+            if (plan.getHostId() != null) {
+                hosts.removeIf(host -> host.getId() != plan.getHostId());
+            }
             if (hostTag != null) {
                 for (HostVO host : hosts) {
                     hostDao.loadHostTags(host);
