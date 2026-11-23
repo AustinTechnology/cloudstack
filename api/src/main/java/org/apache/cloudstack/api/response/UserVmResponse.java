@@ -1208,6 +1208,27 @@ public class UserVmResponse extends BaseResponseWithTagInformation implements Co
         this.instanceSnapshotSupported = supported;
     }
 
+    // Getters too: the metrics list responses copy a VM response by its bean properties, and drop a field without one.
+    public Boolean getInstanceNicChangeSupported() {
+        return instanceNicChangeSupported;
+    }
+
+    public Boolean getInstanceNicHotplugSupported() {
+        return instanceNicHotplugSupported;
+    }
+
+    public Boolean getInstanceStorageSupported() {
+        return instanceStorageSupported;
+    }
+
+    public Boolean getInstanceIsoSupported() {
+        return instanceIsoSupported;
+    }
+
+    public Boolean getInstanceSnapshotSupported() {
+        return instanceSnapshotSupported;
+    }
+
     public Boolean getInstanceScaleSupported() {
         return instanceScaleSupported;
     }
