@@ -1053,7 +1053,8 @@ class Extension:
                 entry["size_bytes"] = int(disk["size"])
             disks.append(entry)
         return {"status": "success",
-                "identity": {"cluster": self.settings["cluster"], "vmid": vm["vmid"], "name": desc["name"], "node": desc["node"].lower()},
+                "identity": {"cluster": self.settings["cluster"], "vmid": vm["vmid"], "name": desc["name"], "node": desc["node"].lower(),
+                             "uuid": vm["guid"]},  # backup software (Veeam) identifies a Hyper-V VM by its GUID
                 "power": "running" if desc["state"] == "Running" else "stopped",
                 "config_digest": self.digest(desc), "cpus": int(desc["cpus"]), "memory_mb": memory_mb,
                 "agent_available": bool(desc.get("kvp")), "nics": nics, "disks": disks}

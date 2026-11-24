@@ -512,7 +512,7 @@ class GetConfig(Base):
         rc, cfg = self.run_action("getconfig", payload(vmid=vmid))
         self.assertEqual(rc, 0, cfg)
         assert_getconfig(self, cfg, vmid)
-        self.assertEqual(cfg["identity"], {"cluster": CLUSTER, "vmid": vmid, "name": "legacy-web01", "node": "hv01"})
+        self.assertEqual(cfg["identity"], {"cluster": CLUSTER, "vmid": vmid, "name": "legacy-web01", "node": "hv01", "uuid": vm["guid"]})
         self.assertEqual(cfg["memory_mb"], 2048)
         nics = {n["mac"]: n for n in cfg["nics"]}
         self.assertEqual(nics["00:15:5d:01:02:03"]["ip_addresses"], ["10.0.0.5"])
