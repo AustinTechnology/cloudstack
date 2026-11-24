@@ -38,8 +38,10 @@ import org.apache.http.HttpHeaders;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.HttpEntityEnclosingRequestBase;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
@@ -178,6 +180,47 @@ public class VbrRestClient {
         return session(n);
     }
 
+    /** The job as Veeam returns it (Hyper-V jobs only; Proxmox jobs are not readable through the REST API). */
+    public JsonNode getJob(String jobId) {
+        return send(new HttpGet(url("/api/v1/jobs/" + enc(jobId), null)), null);
+    }
+
+    /** Replaces the job with the given model (as read with getJob, edited). Needs the Backup Administrator role. */
+    public void putJob(String jobId, JsonNode job) {
+        HttpPut put = new HttpPut(url("/api/v1/jobs/" + enc(jobId), null));
+        try {
+            send(put, MAPPER.writeValueAsString(job));
+        } catch (IOException e) {
+            throw new CloudRuntimeException(e);
+        }
+    }
+
+    /** The Hyper-V inventory object of the VM with this GUID, searched on every Hyper-V server Veeam manages; null if none. */
+    public JsonNode findHyperVVm(String guid) {
+        String body = "{\"filter\":{\"type\":\"PredicateExpression\",\"operation\":\"in\",\"property\":\"Type\",\"value\":\"VirtualMachine\"},"
+                + "\"pagination\":{\"skip\":0,\"limit\":10000}}";
+        for (JsonNode server : send(new HttpPost(url("/api/v1/inventory", null)), "{}").path("data")) {
+            if (!"HyperV".equals(text(server, "platform"))) {
+                continue;
+            }
+            for (JsonNode o : send(new HttpPost(url("/api/v1/inventory/" + enc(text(server, "hostName")), null)), body).path("data")) {
+                if ("VirtualMachine".equals(text(o, "type")) && guid.equalsIgnoreCase(text(o, "objectId"))) {
+                    return o;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Ad-hoc incremental of one Hyper-V VM (its inventory object) that already has a full backup. */
+    public Session quickBackupHyperV(JsonNode vm) {
+        try {
+            return session(send(new HttpPost(url("/api/v1/jobs/quickBackup/hyperV", null)), MAPPER.writeValueAsString(vm)));
+        } catch (IOException e) {
+            throw new CloudRuntimeException(e);
+        }
+    }
+
     public Session getSession(String sessionId) {
         return session(send(new HttpGet(url("/api/v1/sessions/" + enc(sessionId), null)), null));
     }
@@ -230,8 +273,8 @@ public class VbrRestClient {
     private JsonNode send(HttpRequestBase request, String jsonBody) {
         request.setHeader("x-api-version", apiVersion);
         request.setHeader(HttpHeaders.ACCEPT, "application/json");
-        if (request instanceof HttpPost) {
-            ((HttpPost) request).setEntity(new StringEntity(jsonBody == null ? "{}" : jsonBody, ContentType.APPLICATION_JSON));
+        if (request instanceof HttpEntityEnclosingRequestBase) {
+            ((HttpEntityEnclosingRequestBase) request).setEntity(new StringEntity(jsonBody == null ? "{}" : jsonBody, ContentType.APPLICATION_JSON));
         }
         try {
             request.setHeader(HttpHeaders.AUTHORIZATION, "Bearer " + token());

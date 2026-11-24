@@ -2294,6 +2294,14 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public Answer setInstancePool(VirtualMachine vm, String pool, boolean remove) {
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put("pool", pool);
+        parameters.put("remove", remove);
+        return runInstanceAction(vm, SET_POOL_ACTION, parameters);
+    }
+
+    @Override
     public Answer changeInstanceDisk(VirtualMachine vm, String action, Map<String, Object> parameters) {
         if (!DISK_ACTIONS.contains(action)) {
             return new Answer(null, false, "Unknown disk action");
@@ -2328,6 +2336,12 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             Extension extension = getExtensionForCluster(host.getClusterId());
             if (extension == null || !isInstanceScaleSupported(extension.getId())) {
                 return new Answer(null, false, "The instance's extension does not support scaling.");
+            }
+        }
+        if (SET_POOL_ACTION.equals(action)) {
+            Extension extension = getExtensionForCluster(host.getClusterId());
+            if (extension == null || !isInstancePoolSupported(extension.getId())) {
+                return new Answer(null, false, "The instance's extension does not support pools.");
             }
         }
         if (DISK_ACTIONS.contains(action)) {
@@ -2405,6 +2419,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             return false;
         }
         ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(extensionId, INSTANCE_SCALE_SUPPORTED);
+        return detailsVO != null && Boolean.parseBoolean(StringUtils.trim(detailsVO.getValue()));
+    }
+
+    @Override
+    public boolean isInstancePoolSupported(long extensionId) {
+        Extension extension = getExtension(extensionId);
+        if (extension == null || extension.getType() != Extension.Type.Orchestrator
+                || extension.getState() != Extension.State.Enabled) {
+            return false;
+        }
+        ExtensionDetailsVO detailsVO = extensionDetailsDao.findDetail(extensionId, INSTANCE_POOL_SUPPORTED);
         return detailsVO != null && Boolean.parseBoolean(StringUtils.trim(detailsVO.getValue()));
     }
 

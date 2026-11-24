@@ -117,6 +117,15 @@ public interface ExtensionsManager extends Manager {
 
     String SCALE_ACTION = "scale";
 
+    /**
+     * Asks the orchestrator extension of an External instance to add it to the existing provider pool {@code pool}
+     * (moving it out of its current pool), or with {@code remove} to take it out of that pool. The extension must
+     * declare {@link org.apache.cloudstack.extension.ExtensionHelper#INSTANCE_POOL_SUPPORTED}.
+     */
+    Answer setInstancePool(VirtualMachine vm, String pool, boolean remove);
+
+    String SET_POOL_ACTION = "setpool";
+
     /** Read-only configuration snapshot from the currently assigned extension. */
     Answer getInstanceConfig(VirtualMachine vm);
 

@@ -58,6 +58,14 @@ public interface ExtensionHelper {
 
     String INSTANCE_STORAGE_SUPPORTED = "instancestoragesupported";
 
+    /**
+     * Opt-in for the "setpool" instance action: the extension can put an instance into (or take it out of) a
+     * provider resource pool, which backup software such as Veeam uses to select the instances a job protects.
+     */
+    String INSTANCE_POOL_SUPPORTED = "instancepoolsupported";
+
+    boolean isInstancePoolSupported(long extensionId);
+
     /** Whether this enabled orchestrator reports the disks of its instances and can add, grow, delete and move them. */
     boolean isInstanceStorageSupported(long extensionId);
 
