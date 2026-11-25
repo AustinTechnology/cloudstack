@@ -174,6 +174,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     private Map<String, Backup.Metric> backupFilesMetricsMap = new HashMap<>();
     private final VbrRestorePoints restRestorePoints = new VbrRestorePoints();
+    /** Veeam job states per zone, as of the last backup sync (job id to state). */
+    private final Map<Long, Map<String, VbrRestClient.JobState>> restJobStates = new java.util.concurrent.ConcurrentHashMap<>();
 
     private static boolean isExternal(final VirtualMachine vm) {
         return vm != null && vm.getHypervisorType() == Hypervisor.HypervisorType.External;
@@ -547,7 +549,14 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 }
             }
             if (session == null) {
-                // Veeam has no per-VM ad-hoc backup for Proxmox; run the instance's job (incremental).
+                // Veeam has no per-VM ad-hoc backup for Proxmox; run the instance's job (incremental). Instances
+                // sharing a job ask together when their CloudStack schedules fall due: one run serves them all.
+                for (VbrRestClient.JobState state : client.listJobStates()) {
+                    if (state.id.equals(vm.getBackupExternalId()) && !"Stopped".equalsIgnoreCase(state.status)) {
+                        logger.info("Veeam job {} for {} is already running ({}); not starting it again", state.name, vm, state.status);
+                        return new Pair<>(true, null);
+                    }
+                }
                 session = client.startJob(vm.getBackupExternalId(), false);
             }
             logger.info("Started Veeam backup for {} (job {}): session {}", vm, vm.getBackupExternalId(), session.id);
@@ -636,6 +645,63 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, null, hostIp, dataStoreUuid);
     }
 
+    private VbrRestClient.JobState restJobState(final Long zoneId, final String jobId) {
+        Map<String, VbrRestClient.JobState> states = restJobStates.get(zoneId);
+        return states == null || jobId == null ? null : states.get(jobId);
+    }
+
+    /**
+     * A Veeam job with a schedule of its own runs the backups: CloudStack shows that schedule read-only. A job without
+     * one is run by CloudStack, on its schedules or Backup now. A job not seen yet counts as scheduled in Veeam, so
+     * CloudStack never starts one on a schedule by mistake.
+     */
+    @Override
+    public boolean isBackupScheduleManagedByProvider(final BackupOffering offering) {
+        if (offering == null || !getName().equals(offering.getProvider()) || !isRestEnabled(offering.getZoneId())) {
+            return false;
+        }
+        VbrRestClient.JobState state = restJobState(offering.getZoneId(), offering.getExternalId());
+        if (state == null) {
+            return !isEnterpriseManagerEnabled(offering.getZoneId());
+        }
+        return StringUtils.isNotBlank(state.nextRun);
+    }
+
+    /**
+     * The Veeam job's schedule as one CloudStack schedule record. The REST API gives only the job's last and next run
+     * (Proxmox jobs cannot be read in full), so the interval is taken from their distance: monthly from 27 days,
+     * weekly from 6 days, else daily, at the next run's time and UTC offset.
+     */
+    @Override
+    public List<BackupSchedule> listProviderBackupSchedules(final VirtualMachine vm) {
+        VbrRestClient.JobState state = restJobState(vm.getDataCenterId(), vm.getBackupExternalId());
+        if (state == null) {
+            return null;
+        }
+        if (StringUtils.isBlank(state.nextRun)) {
+            return new ArrayList<>();
+        }
+        java.time.OffsetDateTime next = java.time.OffsetDateTime.parse(state.nextRun);
+        long days = StringUtils.isBlank(state.lastRun) ? 1
+                : java.time.Duration.between(java.time.OffsetDateTime.parse(state.lastRun), next).toDays();
+        com.cloud.utils.DateUtil.IntervalType type;
+        String schedule;
+        if (days >= 27) {
+            type = com.cloud.utils.DateUtil.IntervalType.MONTHLY;
+            schedule = String.format("%02d:%02d:%02d", next.getMinute(), next.getHour(), next.getDayOfMonth());
+        } else if (days >= 6) {
+            type = com.cloud.utils.DateUtil.IntervalType.WEEKLY;
+            schedule = String.format("%02d:%02d:%d", next.getMinute(), next.getHour(), next.getDayOfWeek().getValue() % 7 + 1);
+        } else {
+            type = com.cloud.utils.DateUtil.IntervalType.DAILY;
+            schedule = String.format("%02d:%02d", next.getMinute(), next.getHour());
+        }
+        String timezone = "GMT" + (next.getOffset().getTotalSeconds() == 0 ? "" : next.getOffset().getId());
+        List<BackupSchedule> schedules = new ArrayList<>();
+        schedules.add(new BackupScheduleVO(vm.getId(), type, schedule, timezone, null, 0, null, vm.getAccountId(), vm.getDomainId(), false));
+        return schedules;
+    }
+
     private void requireNotExternal(VirtualMachine vm, String operation) {
         if (isExternal(vm)) {
             throw new CloudRuntimeException(operation + " Veeam backups of External instances is not supported yet; restore from the Veeam console.");
@@ -648,6 +714,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             backupFilesMetricsMap = getClient(zoneId).getBackupMetrics();
         }
         if (isRestEnabled(zoneId)) {
+            Map<String, VbrRestClient.JobState> states = new HashMap<>();
+            for (VbrRestClient.JobState state : getRestClient(zoneId).listJobStates()) {
+                states.put(state.id, state);
+            }
+            restJobStates.put(zoneId, states);
             applyPendingMemberships(zoneId);
             syncRestRestorePoints(zoneId);
         }

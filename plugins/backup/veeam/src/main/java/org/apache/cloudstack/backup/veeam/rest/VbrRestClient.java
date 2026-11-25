@@ -95,7 +95,7 @@ public class VbrRestClient {
 
     /** A Veeam job the provider can offer: Proxmox and Hyper-V backup jobs. */
     public static class JobState {
-        public String id, name, type, status, lastResult, lastRun, sessionId;
+        public String id, name, type, status, lastResult, lastRun, nextRun, sessionId;
     }
 
     /** One machine in a Veeam backup. objectId is the hypervisor's own VM id (Proxmox SMBIOS UUID, Hyper-V GUID). */
@@ -125,7 +125,8 @@ public class VbrRestClient {
         for (JsonNode n : getAll("/api/v1/jobs/states", null)) {
             JobState j = new JobState();
             j.id = text(n, "id"); j.name = text(n, "name"); j.type = text(n, "type"); j.status = text(n, "status");
-            j.lastResult = text(n, "lastResult"); j.lastRun = text(n, "lastRun"); j.sessionId = text(n, "sessionId");
+            j.lastResult = text(n, "lastResult"); j.lastRun = text(n, "lastRun"); j.nextRun = text(n, "nextRun");
+            j.sessionId = text(n, "sessionId");
             jobs.add(j);
         }
         return jobs;
