@@ -1079,7 +1079,20 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             return;
         }
         if ("migrating".equals(phase)) {
-            VbrRestClient.Session migration = client.getProxmoxInstantRecoveryMigration(state.get("migration").getAsString());
+            // Veeam forgets a migration once it ends; its Instant Recovery session then finishes too (Success when the
+            // disks no longer depend on the backup). While the session runs, the migration's own state tells a failure.
+            VbrRestClient.Session ir = client.getProxmoxInstantRecovery(state.get("session").getAsString());
+            VbrRestClient.Session migration = new VbrRestClient.Session();
+            if ("Finished".equalsIgnoreCase(ir.state) || "Stopped".equalsIgnoreCase(ir.state)) {
+                migration.state = ir.state;
+                migration.result = ir.result;
+            } else {
+                try {
+                    migration = client.getProxmoxInstantRecoveryMigration(state.get("migration").getAsString());
+                } catch (CloudRuntimeException e) {
+                    return;
+                }
+            }
             if (!"Finished".equalsIgnoreCase(migration.state) && !"Stopped".equalsIgnoreCase(migration.state)) {
                 return;
             }
