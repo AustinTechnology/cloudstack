@@ -185,6 +185,11 @@ public class VbrRestClient {
         return session(n);
     }
 
+    /** Every job the public REST API can read in full (Hyper-V and backup copy jobs; not Proxmox jobs). */
+    public List<JsonNode> listJobs() {
+        return getAll("/api/v1/jobs", null);
+    }
+
     /** The job as Veeam returns it (Hyper-V jobs only; Proxmox jobs are not readable through the REST API). */
     public JsonNode getJob(String jobId) {
         return send(new HttpGet(url("/api/v1/jobs/" + enc(jobId), null)), null);

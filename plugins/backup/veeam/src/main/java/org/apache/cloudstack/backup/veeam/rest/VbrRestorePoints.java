@@ -40,9 +40,10 @@ import org.apache.logging.log4j.Logger;
  * Restore points of External (Proxmox, Hyper-V) instances as Veeam reports them, gathered once per
  * backup-sync cycle outside any database transaction. The framework's sync then reads them from memory.
  *
- * An instance is matched to Veeam by its hypervisor UUID (Proxmox SMBIOS UUID, Hyper-V VM GUID), and only
- * restore points in the backup of the Veeam job its backup offering names are listed, so backup-copy chains
- * are not listed twice.
+ * An instance is matched to Veeam by its hypervisor UUID (Proxmox SMBIOS UUID, Hyper-V VM GUID). Every restore
+ * point Veeam lists for it is shown, whatever job or copy made it (its own job, a former shared job, backup copies
+ * on repositories this Veeam server manages), so history stays visible when the instance changes job. An instance
+ * given a job id lists only that job's points.
  */
 public class VbrRestorePoints {
     private static final Logger LOG = LogManager.getLogger(VbrRestorePoints.class);

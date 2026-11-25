@@ -34,6 +34,7 @@ import org.apache.cloudstack.backup.veeam.VeeamClient;
 import org.apache.cloudstack.backup.veeam.api.Job;
 import org.apache.cloudstack.backup.veeam.rest.VbrRestClient;
 import org.apache.cloudstack.backup.veeam.rest.VbrRestorePoints;
+import org.apache.cloudstack.backup.veeam.rest.VspcClient;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
@@ -93,6 +94,10 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     public static final String QUICK_RESTORE_DETAIL = "veeam.quickrestore";
     /** Instance detail: its CloudStack schedules changed and are still to be written to its Veeam job ("pending"). */
     public static final String SCHEDULE_DETAIL = "veeam.schedule";
+    /** Instance detail: the backup copy job (public REST id) that copies its own job offsite. */
+    public static final String COPY_DETAIL = "veeam.copyjob";
+    /** Instance detail: its own job still has to be assigned to the customer's company in VSPC ("pending"). */
+    public static final String VSPC_DETAIL = "veeam.vspc";
     private static final Set<String> REST_JOB_TYPES = Set.of("ProxmoxBackupJob", "HyperVBackup");
     private static final String UUID_PATTERN = "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
 
@@ -165,6 +170,29 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                     + "storage holding qcow2 on every node (NFS, or a directory on a shared file system). Afterwards the disks move "
                     + "back to their own storage. Empty turns quick restore of Proxmox instances off.", true, ConfigKey.Scope.Zone);
 
+    private ConfigKey<String> VeeamCopyJob = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.copy.job", "",
+            "The name of the customer's Veeam backup copy job that copies its backups offsite. Offsite offerings (a template "
+                    + "job that a template backup copy job copies) add each instance's own job to it.", true, ConfigKey.Scope.Domain);
+
+    private ConfigKey<String> VeeamCopyRepository = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.copy.repository", "",
+            "The id of the repository (for example the customer's Veeam Cloud Connect repository) a backup copy job made from the "
+                    + "template copies to, for a customer without backup.plugin.veeam.copy.job.", true, ConfigKey.Scope.Domain);
+
+    private ConfigKey<String> VspcUrl = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.vspc.url", "",
+            "The Veeam Service Provider Console URL (https://vspc.example.com:1280). When set, instances' own Veeam jobs are "
+                    + "assigned to their customer's company in VSPC.", true, ConfigKey.Scope.Zone);
+
+    private ConfigKey<String> VspcApiKey = new ConfigKey<>("Secure", String.class,
+            "backup.plugin.veeam.vspc.api.key", "", "A VSPC REST API key allowed to assign jobs to companies.", true, ConfigKey.Scope.Zone);
+
+    private ConfigKey<String> VspcCompany = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.vspc.company", "",
+            "The VSPC company (UID) the domain's instance jobs are assigned to. Empty means the company VSPC assigns the "
+                    + "domain's backup copy job to.", true, ConfigKey.Scope.Domain);
+
     @Inject
     private ExtensionsManager extensionsManager;
     @Inject
@@ -202,6 +230,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     private final VbrRestorePoints restRestorePoints = new VbrRestorePoints();
     /** Veeam job states per zone, as of the last backup sync (job id to state). */
     private final Map<Long, Map<String, VbrRestClient.JobState>> restJobStates = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Per zone: template backup copy jobs by the template job they copy (offsite offerings), as of the last sync. */
+    private final Map<Long, Map<String, com.fasterxml.jackson.databind.JsonNode>> copyTemplates = new java.util.concurrent.ConcurrentHashMap<>();
 
     private static boolean isExternal(final VirtualMachine vm) {
         return vm != null && vm.getHypervisorType() == Hypervisor.HypervisorType.External;
@@ -497,13 +527,30 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             }
         }
         vmInstanceDetailsDao.addDetail(vm.getId(), VM_JOB_DETAIL, publicId, false);
-        return "in its own Veeam job " + name + ", made from template " + template.name;
+        String outcome = "in its own Veeam job " + name + ", made from template " + template.name;
+        if (usesPools(vm)) {
+            outcome += leaveSharedPool(vm);
+        }
+        com.fasterxml.jackson.databind.JsonNode copyTemplate = copyTemplateOf(offering);
+        if (copyTemplate != null) {
+            outcome += ", copied offsite by " + addToCopyJob(vm, publicId, name, copyTemplate);
+        }
+        if (StringUtils.isNotBlank(VspcUrl.valueIn(vm.getDataCenterId()))) {
+            vmInstanceDetailsDao.addDetail(vm.getId(), VSPC_DETAIL, "pending", false);
+        }
+        return outcome;
     }
 
     /** Deletes the instance's own Veeam job. Its restore points stay in the repository until removed in Veeam. */
     private String deleteInstanceJob(final VMInstanceVO vm) {
         VbrRestClient client = getRestClient(vm.getDataCenterId());
         VMInstanceDetailVO publicId = vmInstanceDetailsDao.findDetail(vm.getId(), VM_JOB_DETAIL);
+        VMInstanceDetailVO copy = vmInstanceDetailsDao.findDetail(vm.getId(), COPY_DETAIL);
+        if (copy != null) {
+            removeFromCopyJob(client, copy.getValue(), publicId.getValue());
+            vmInstanceDetailsDao.removeDetail(vm.getId(), COPY_DETAIL);
+        }
+        vmInstanceDetailsDao.removeDetail(vm.getId(), VSPC_DETAIL);
         VMInstanceDetailVO pveId = vmInstanceDetailsDao.findDetail(vm.getId(), PVE_JOB_DETAIL);
         VbrRestClient.JobState state = restJobState(vm.getDataCenterId(), publicId.getValue());
         if (pveId != null) {
@@ -767,6 +814,192 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         logger.info("Scheduled the backups of {} {} at {} ({}), as its template job does", vm, schedule.first(), schedule.second(), timezone);
     }
 
+    /**
+     * Takes a Proxmox instance that now has its own job out of the customer pool, so the customer's shared pool job no
+     * longer backs it up too. Its restore points in the shared job stay where they are and stay listed.
+     */
+    private String leaveSharedPool(final VMInstanceVO vm) {
+        VMInstanceDetailVO recorded = vmInstanceDetailsDao.findDetail(vm.getId(), POOL_DETAIL);
+        String pool = recorded != null ? recorded.getValue() : proxmoxPoolFor(vm);
+        if (pool == null) {
+            return "";
+        }
+        Answer answer = extensionsManager.setInstancePool(vm, pool, true);
+        if (answer == null || !answer.getResult()) {
+            String error = extensionError(answer);
+            if (error.contains("does not exist")) {
+                return "";
+            }
+            throw new CloudRuntimeException("Could not take the instance out of the shared Proxmox pool " + pool + ": " + error);
+        }
+        vmInstanceDetailsDao.removeDetail(vm.getId(), POOL_DETAIL);
+        String previous = "";
+        try {
+            previous = new JsonParser().parse(answer.getDetails().substring(answer.getDetails().indexOf('{'))).getAsJsonObject().get("previous_pool").getAsString();
+        } catch (RuntimeException e) {
+            // not reported
+        }
+        return pool.equals(previous) ? ", out of the shared Proxmox pool " + pool : "";
+    }
+
+    /** Reads which template backup copy jobs copy which template jobs (an offering is offsite when its template has one). */
+    private void readCopyTemplates(final Long zoneId) {
+        String prefix = StringUtils.trimToNull(VeeamTemplatePrefix.valueIn(zoneId));
+        Map<String, com.fasterxml.jackson.databind.JsonNode> templates = new HashMap<>();
+        Map<String, VbrRestClient.JobState> states = restJobStates.get(zoneId);
+        boolean any = false;
+        for (VbrRestClient.JobState state : states == null ? new ArrayList<VbrRestClient.JobState>() : states.values()) {
+            any |= prefix != null && state.name != null && state.name.startsWith(prefix) && "BackupCopy".equals(state.type);
+        }
+        if (any) {
+            for (com.fasterxml.jackson.databind.JsonNode job : getRestClient(zoneId).listJobs()) {
+                if ("BackupCopy".equals(job.path("type").asText()) && job.path("name").asText().startsWith(prefix)) {
+                    for (com.fasterxml.jackson.databind.JsonNode source : job.path("sourceObjects").path("includes").path("jobs")) {
+                        templates.put(source.path("id").asText(), job);
+                    }
+                }
+            }
+        }
+        copyTemplates.put(zoneId, templates);
+    }
+
+    /** The template backup copy job of an offsite offering (one whose template job a template copy job copies), or null. */
+    protected com.fasterxml.jackson.databind.JsonNode copyTemplateOf(final BackupOffering offering) {
+        Map<String, com.fasterxml.jackson.databind.JsonNode> templates = offering == null ? null : copyTemplates.get(offering.getZoneId());
+        return templates == null ? null : templates.get(offering.getExternalId());
+    }
+
+    /**
+     * Adds the instance's own job to its customer's backup copy job: the one named by the domain's
+     * backup.plugin.veeam.copy.job (adopting the customer's existing copy job), else one made from the template copy job
+     * for the domain's backup.plugin.veeam.copy.repository. Returns the copy job's name.
+     */
+    private String addToCopyJob(final VMInstanceVO vm, final String jobId, final String jobName, final com.fasterxml.jackson.databind.JsonNode template) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        String copyId = null;
+        String wanted = StringUtils.trimToNull(VeeamCopyJob.valueInDomain(vm.getDomainId()));
+        com.cloud.domain.DomainVO domain = domainDao.findById(vm.getDomainId());
+        String made = StringUtils.left("CS - " + (domain == null ? "unknown" : domain.getName()) + " - Offsite", 40).replaceAll("[~\"#%&*:<>!?/\\\\{|}.'`$\\r\\n]", "-");
+        for (VbrRestClient.JobState state : client.listJobStates()) {
+            if ("BackupCopy".equals(state.type) && (state.name.equals(wanted) || (wanted == null && state.name.equals(made)))) {
+                copyId = state.id;
+            }
+        }
+        if (copyId == null && wanted != null) {
+            throw new CloudRuntimeException("Veeam has no backup copy job named " + wanted + " (backup.plugin.veeam.copy.job of the domain)");
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode source = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                .put("type", usesPools(vm) ? "ProxmoxBackupJob" : "HyperVBackup").put("id", jobId).put("name", jobName);
+        if (copyId == null) {
+            String repository = StringUtils.trimToNull(VeeamCopyRepository.valueInDomain(vm.getDomainId()));
+            if (repository == null) {
+                throw new CloudRuntimeException("The domain has neither a backup copy job (backup.plugin.veeam.copy.job) nor a repository to copy to "
+                        + "(backup.plugin.veeam.copy.repository)");
+            }
+            copyId = client.cloneJob(template.path("id").asText()).path("id").asText();
+            com.fasterxml.jackson.databind.node.ObjectNode job = (com.fasterxml.jackson.databind.node.ObjectNode) client.getJob(copyId);
+            job.put("name", made);
+            job.put("description", "Offsite copies of CloudStack instances of " + (domain == null ? "?" : domain.getName()) + ", from "
+                    + template.path("name").asText() + ". Made by CloudStack.");
+            com.fasterxml.jackson.databind.node.ObjectNode includes = job.with("sourceObjects").with("includes");
+            includes.putArray("jobs").add(source);
+            job.with("target").put("backupRepositoryId", repository);
+            client.putJob(copyId, job);
+            client.enableJob(copyId);
+            logger.info("Created Veeam backup copy job {} for domain {} from template {}", made, domain, template.path("name").asText());
+        } else {
+            com.fasterxml.jackson.databind.node.ObjectNode job = (com.fasterxml.jackson.databind.node.ObjectNode) client.getJob(copyId);
+            com.fasterxml.jackson.databind.node.ArrayNode jobs = job.with("sourceObjects").with("includes").withArray("jobs");
+            boolean present = false;
+            for (com.fasterxml.jackson.databind.JsonNode j : jobs) {
+                present |= jobId.equals(j.path("id").asText());
+            }
+            if (!present) {
+                jobs.add(source);
+                client.putJob(copyId, job);
+            }
+        }
+        vmInstanceDetailsDao.addDetail(vm.getId(), COPY_DETAIL, copyId, false);
+        return client.getJob(copyId).path("name").asText();
+    }
+
+    private void removeFromCopyJob(final VbrRestClient client, final String copyId, final String jobId) {
+        com.fasterxml.jackson.databind.node.ObjectNode job = (com.fasterxml.jackson.databind.node.ObjectNode) client.getJob(copyId);
+        com.fasterxml.jackson.databind.node.ArrayNode jobs = job.with("sourceObjects").with("includes").withArray("jobs");
+        for (java.util.Iterator<com.fasterxml.jackson.databind.JsonNode> it = jobs.iterator(); it.hasNext(); ) {
+            if (jobId.equals(it.next().path("id").asText())) {
+                it.remove();
+            }
+        }
+        if (jobs.isEmpty()) {
+            // Veeam refuses a copy job without sources; leave it for the operator to remove.
+            logger.info("Backup copy job {} has no other sources; leaving it as it is", job.path("name").asText());
+            return;
+        }
+        client.putJob(copyId, job);
+    }
+
+    private VspcClient getVspcClient(final Long zoneId) {
+        try {
+            return new VspcClient(VspcUrl.valueIn(zoneId), VspcApiKey.valueIn(zoneId), VeeamValidateSSLSecurity.valueIn(zoneId), VeeamApiRequestTimeout.valueIn(zoneId));
+        } catch (NoSuchAlgorithmException | KeyManagementException e) {
+            throw new CloudRuntimeException("Failed to build the VSPC API client: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Assigns instances' own jobs to their customer's company in VSPC (it bills per protected machine by company). VSPC
+     * learns of a new job some minutes after Veeam made it, so this retries each sync until VSPC reports the assignment.
+     */
+    private void assignVspcCompanies(final Long zoneId) {
+        if (StringUtils.isBlank(VspcUrl.valueIn(zoneId))) {
+            return;
+        }
+        for (VMInstanceDetailVO pending : vmInstanceDetailsDao.findDetails(VSPC_DETAIL)) {
+            VMInstanceVO vm = vmInstanceDao.findById(pending.getResourceId());
+            VMInstanceDetailVO job = vm == null ? null : vmInstanceDetailsDao.findDetail(vm.getId(), VM_JOB_DETAIL);
+            if (vm == null || job == null) {
+                vmInstanceDetailsDao.removeDetail(pending.getResourceId(), VSPC_DETAIL);
+                continue;
+            }
+            if (!zoneId.equals(vm.getDataCenterId())) {
+                continue;
+            }
+            try {
+                VspcClient vspc = getVspcClient(zoneId);
+                String company = StringUtils.trimToNull(VspcCompany.valueInDomain(vm.getDomainId()));
+                VMInstanceDetailVO copy = vmInstanceDetailsDao.findDetail(vm.getId(), COPY_DETAIL);
+                if (company == null && copy != null) {
+                    company = StringUtils.trimToNull(vspc.jobCompany(copy.getValue()));
+                }
+                if (company == null) {
+                    throw new CloudRuntimeException("No VSPC company for the domain: set backup.plugin.veeam.vspc.company");
+                }
+                String current = vspc.jobCompany(job.getValue());
+                if (current == null) {
+                    logger.debug("VSPC does not know the Veeam job of {} yet", vm);
+                    continue;
+                }
+                if (!company.equals(current)) {
+                    vspc.assignJob(job.getValue(), company);
+                    logger.info("Asked VSPC to assign the Veeam job of {} to company {}", vm, company);
+                    continue;
+                }
+                vmInstanceDetailsDao.removeDetail(vm.getId(), VSPC_DETAIL);
+                ActionEventUtils.onActionEvent(User.UID_SYSTEM, vm.getAccountId(), vm.getDomainId(), EventTypes.EVENT_VM_BACKUP_OFFERING_ASSIGN,
+                        "Veeam: the instance's job is assigned to its company in VSPC", vm.getId(), ApiCommandResourceType.VirtualMachine.toString());
+            } catch (RuntimeException e) {
+                logger.warn("Assigning the Veeam job of {} in VSPC failed: {}", vm, e.getMessage());
+                if (!"failed".equals(pending.getValue())) {
+                    vmInstanceDetailsDao.addDetail(vm.getId(), VSPC_DETAIL, "failed", false);
+                    ActionEventUtils.onCompletedActionEvent(User.UID_SYSTEM, vm.getAccountId(), EventVO.LEVEL_ERROR, EventTypes.EVENT_VM_BACKUP_OFFERING_ASSIGN,
+                            "Assigning the instance's Veeam job to its company in VSPC failed (retried each backup sync): " + e.getMessage(), vm.getId(),
+                            ApiCommandResourceType.VirtualMachine.toString(), 0);
+                }
+            }
+        }
+    }
+
     /** The extension's own error message (its JSON "error"), not the whole answer. */
     private static String extensionError(final Answer answer) {
         if (answer == null) {
@@ -797,7 +1030,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         List<VbrRestorePoints.Instance> instances = new ArrayList<>();
         for (VMInstanceVO vm : vmInstanceDao.listByZoneAndBackupOffering(zoneId, null)) {
             if (isExternal(vm)) {
-                instances.add(new VbrRestorePoints.Instance(vm.getId(), getBackupUuid(vm), jobIdOf(vm)));
+                instances.add(new VbrRestorePoints.Instance(vm.getId(), getBackupUuid(vm), null));
             }
         }
         if (!instances.isEmpty()) {
@@ -1633,8 +1866,10 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 states.put(state.id, state);
             }
             restJobStates.put(zoneId, states);
+            readCopyTemplates(zoneId);
             applyPendingMemberships(zoneId);
             reconcileInstanceJobs(zoneId);
+            assignVspcCompanies(zoneId);
             finishQuickRestores(zoneId);
             syncRestRestorePoints(zoneId);
         }
@@ -1727,6 +1962,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 VeeamRestoreTimeout,
                 VeeamTemplatePrefix,
                 VeeamQuickRestoreStorage,
+                VeeamCopyJob,
+                VeeamCopyRepository,
+                VspcUrl,
+                VspcApiKey,
+                VspcCompany,
                 VeeamTaskPollInterval,
                 VeeamTaskPollMaxRetry,
                 VeeamEnterpriseManagerEnabled,
