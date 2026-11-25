@@ -512,9 +512,13 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         final String keyword = cmd.getKeyword();
         Long domainId = cmd.getDomainId();
 
+        CallContext ctx = CallContext.current();
+        final Account caller = ctx.getCallingAccount();
+
         if (offeringId != null) {
             BackupOfferingVO offering = backupOfferingDao.findById(offeringId);
-            if (offering == null) {
+            // An offering restricted to other domains is reported as missing, so its existence is not disclosed either.
+            if (offering == null || (Account.Type.ADMIN != caller.getType() && !isOfferingAvailableToDomain(offering, caller.getDomainId()))) {
                 throw new CloudRuntimeException("Offering ID " + offeringId + " does not exist");
             }
             return new Pair<>(Collections.singletonList(offering), 1);
@@ -525,10 +529,17 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         sb.and("zone_id", sb.entity().getZoneId(), SearchCriteria.Op.EQ);
         sb.and("name", sb.entity().getName(), SearchCriteria.Op.LIKE);
 
-        CallContext ctx = CallContext.current();
-        final Account caller = ctx.getCallingAccount();
-        if (Account.Type.ADMIN != caller.getType() && domainId == null) {
-            domainId = caller.getDomainId();
+        if (Account.Type.ADMIN != caller.getType()) {
+            if (domainId == null) {
+                domainId = caller.getDomainId();
+            } else if (!domainId.equals(caller.getDomainId())) {
+                // Listing for another domain needs access to it (a domain administrator's subdomains).
+                DomainVO domain = domainDao.findById(domainId);
+                if (domain == null) {
+                    throw new InvalidParameterValueException("Unable to find the domain to list backup offerings for");
+                }
+                accountManager.checkAccess(caller, domain);
+            }
         }
 
         if (Account.Type.NORMAL == caller.getType()) {
@@ -553,8 +564,7 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         if (domainId != null) {
             List<BackupOfferingVO> filteredOfferings = new ArrayList<>();
             for (BackupOfferingVO offering : result.first()) {
-                List<Long> offeringDomains = backupOfferingDetailsDao.findDomainIds(offering.getId());
-                if (offeringDomains.isEmpty() || offeringDomains.contains(domainId) || containsParentDomain(offeringDomains, domainId)) {
+                if (isOfferingAvailableToDomain(offering, domainId)) {
                     filteredOfferings.add(offering);
                 }
             }
@@ -562,6 +572,12 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         }
 
         return new Pair<>(new ArrayList<>(result.first()), result.second());
+    }
+
+    /** Whether an offering is open to all domains, or restricted to this domain or one of its parents. */
+    private boolean isOfferingAvailableToDomain(BackupOfferingVO offering, Long domainId) {
+        List<Long> offeringDomains = backupOfferingDetailsDao.findDomainIds(offering.getId());
+        return offeringDomains.isEmpty() || offeringDomains.contains(domainId) || containsParentDomain(offeringDomains, domainId);
     }
 
     private boolean containsParentDomain(List<Long> offeringDomains, Long domainId) {
