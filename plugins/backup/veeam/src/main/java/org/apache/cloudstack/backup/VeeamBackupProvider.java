@@ -824,7 +824,16 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     @Override
     public boolean restoreVMFromBackup(VirtualMachine vm, Backup backup, boolean quickRestore, Long hostId) {
         if (isExternal(vm)) {
-            return restoreExternalInPlace(vmInstanceDao.findById(vm.getId()), backup, quickRestore);
+            VMInstanceVO instance = vmInstanceDao.findById(vm.getId());
+            try {
+                return restoreExternalInPlace(instance, backup, quickRestore);
+            } catch (RuntimeException e) {
+                // HA may have been turned off for the restore; a started quick restore turns it back on when it finishes.
+                if (instance.isHaEnabled() && usesPools(instance) && vmInstanceDetailsDao.findDetail(instance.getId(), QUICK_RESTORE_DETAIL) == null) {
+                    resumeProxmoxHa(instance);
+                }
+                throw e;
+            }
         }
         final String restorePointId = backup.getExternalId();
         try {
@@ -857,6 +866,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         }
         VbrRestClient.Session session;
         if (proxmox) {
+            pauseProxmoxHa(vm);
             VMInstanceDetailVO vmid = vmInstanceDetailsDao.findDetail(vm.getId(), "proxmox_vmid");
             if (vmid == null || StringUtils.isBlank(vmid.getValue())) {
                 throw new CloudRuntimeException("The instance has no Proxmox VMID recorded");
@@ -892,15 +902,53 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         logger.info("Veeam restored {} from restore point {} ({}{})", vm, backup.getExternalId(), session.result,
                 session.message == null ? "" : ": " + session.message);
 
-        VMInstanceDetailVO pool = proxmox ? vmInstanceDetailsDao.findDetail(vm.getId(), POOL_DETAIL) : null;
-        if (pool != null) {
-            Answer answer = extensionsManager.setInstancePool(vm, pool.getValue(), false);
-            if (answer == null || !answer.getResult()) {
-                logger.warn("{} is restored but not back in Proxmox pool {} ({}); the backup sync retries", vm, pool.getValue(), extensionError(answer));
-                vmInstanceDetailsDao.addDetail(vm.getId(), MEMBERSHIP_DETAIL, "add", false);
-            }
+        if (proxmox) {
+            reapplyProxmoxPool(vm);
+            resumeProxmoxHa(vm);
         }
         return true;
+    }
+
+    /**
+     * Turns Proxmox HA off for an HA instance before Veeam replaces its VM: HA must not act on a VM being deleted and
+     * recreated, and Proxmox drops the HA resource with the VM anyway. {@link #resumeProxmoxHa} turns it back on.
+     */
+    private void pauseProxmoxHa(final VMInstanceVO vm) {
+        if (!vm.isHaEnabled()) {
+            return;
+        }
+        Answer answer = extensionsManager.setInstanceHa(vm, false);
+        if (answer == null || !answer.getResult()) {
+            throw new CloudRuntimeException("Could not take the instance out of Proxmox HA for the restore: " + extensionError(answer));
+        }
+    }
+
+    /** Puts an HA instance back under Proxmox HA after a restore; returns false (and logs) when that failed. */
+    private boolean resumeProxmoxHa(final VMInstanceVO vm) {
+        if (!vm.isHaEnabled()) {
+            return true;
+        }
+        Answer answer = extensionsManager.setInstanceHa(vm, true);
+        if (answer == null || !answer.getResult()) {
+            logger.warn("{} is restored but not back under Proxmox HA: {}", vm, extensionError(answer));
+            quickRestoreEvent(vm, EventVO.LEVEL_ERROR, "Restored, but not back under Proxmox HA: " + extensionError(answer)
+                    + "; turn HA off and on again for the instance");
+            return false;
+        }
+        return true;
+    }
+
+    /** Puts a restored VM back in the Proxmox pool its offering's job protects (a recreated VM is in no pool). */
+    private void reapplyProxmoxPool(final VMInstanceVO vm) {
+        VMInstanceDetailVO pool = vmInstanceDetailsDao.findDetail(vm.getId(), POOL_DETAIL);
+        if (pool == null) {
+            return;
+        }
+        Answer answer = extensionsManager.setInstancePool(vm, pool.getValue(), false);
+        if (answer == null || !answer.getResult()) {
+            logger.warn("{} is restored but not back in Proxmox pool {} ({}); the backup sync retries", vm, pool.getValue(), extensionError(answer));
+            vmInstanceDetailsDao.addDetail(vm.getId(), MEMBERSHIP_DETAIL, "add", false);
+        }
     }
 
     private static final Map<String, String> BUS_PREFIX = Map.of("Virtio", "virtio", "Scsi", "scsi", "Sata", "sata", "Ide", "ide", "Efi", "efidisk");
@@ -960,6 +1008,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                     + " restore without quick restore", needed >> 30, staging, free >> 30));
         }
 
+        pauseProxmoxHa(vm);
         com.fasterxml.jackson.databind.node.ObjectNode body = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
         body.put("sourceVmId", sourceVmId).put("targetVmClusterId", nodeId).put("targetVmId", sourceVmId)
                 .put("targetVmName", meta.path("name").asText()).put("sourceVmName", meta.path("name").asText())
@@ -985,6 +1034,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 logger.debug("Veeam Instant Recovery session {} not readable this time: {}", session, e.getMessage());
             }
             if (ir != null && "Running".equalsIgnoreCase(ir.state) && !"Failed".equalsIgnoreCase(ir.result)) {
+                reapplyProxmoxPool(vm);
                 logger.info("{} runs from its backup (Instant Recovery session {}); the backup sync finishes the restore", vm, session);
                 return true;
             }
@@ -1168,6 +1218,9 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         }
         state.add("moved", moved);
         state.remove("error");
+        if (!state.has("haBack") && resumeProxmoxHa(vm)) {
+            state.addProperty("haBack", true);
+        }
         if (!waiting) {
             state.addProperty("done", true);
             quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore finished: every disk is on its own storage again");
