@@ -101,6 +101,7 @@ import com.cloud.event.ActionEventUtils;
 import com.cloud.event.EventTypes;
 import com.cloud.event.UsageEventUtils;
 import com.cloud.exception.InvalidParameterValueException;
+import com.cloud.exception.PermissionDeniedException;
 import com.cloud.exception.ResourceAllocationException;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
@@ -2372,6 +2373,7 @@ public class BackupManagerTest {
 
         Account account = Mockito.mock(Account.class);
         when(account.getType()).thenReturn(Account.Type.NORMAL);
+        when(account.getDomainId()).thenReturn(requestedDomainId);
 
         try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
             CallContext contextMock = Mockito.mock(CallContext.class);
@@ -2416,6 +2418,7 @@ public class BackupManagerTest {
 
         Account account = Mockito.mock(Account.class);
         when(account.getType()).thenReturn(Account.Type.NORMAL);
+        when(account.getDomainId()).thenReturn(requestedDomainId);
 
         try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
             CallContext contextMock = Mockito.mock(CallContext.class);
@@ -2464,6 +2467,7 @@ public class BackupManagerTest {
 
         Account account = Mockito.mock(Account.class);
         when(account.getType()).thenReturn(Account.Type.NORMAL);
+        when(account.getDomainId()).thenReturn(childDomainId);
 
         try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
             CallContext contextMock = Mockito.mock(CallContext.class);
@@ -2507,6 +2511,7 @@ public class BackupManagerTest {
 
         Account account = Mockito.mock(Account.class);
         when(account.getType()).thenReturn(Account.Type.NORMAL);
+        when(account.getDomainId()).thenReturn(requestedDomainId);
 
         try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
             CallContext contextMock = Mockito.mock(CallContext.class);
@@ -2555,6 +2560,7 @@ public class BackupManagerTest {
 
         Account account = Mockito.mock(Account.class);
         when(account.getType()).thenReturn(Account.Type.NORMAL);
+        when(account.getDomainId()).thenReturn(requestedDomainId);
 
         try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
             CallContext contextMock = Mockito.mock(CallContext.class);
@@ -2615,6 +2621,64 @@ public class BackupManagerTest {
             assertEquals(2, result.first().size());
             assertTrue(result.first().stream().anyMatch(o -> o.getName().equals("Global Offering")));
             assertTrue(result.first().stream().anyMatch(o -> o.getName().equals("User Domain Offering")));
+        }
+    }
+
+    @Test
+    public void testListBackupOfferingsForAnotherDomainNeedsAccessToIt() {
+        ListBackupOfferingsCmd cmd = Mockito.mock(ListBackupOfferingsCmd.class);
+        when(cmd.getOfferingId()).thenReturn(null);
+        when(cmd.getDomainId()).thenReturn(4L);
+        when(cmd.getStartIndex()).thenReturn(0L);
+        when(cmd.getPageSizeVal()).thenReturn(20L);
+        SearchBuilder<BackupOfferingVO> sb = Mockito.mock(SearchBuilder.class);
+        when(backupOfferingDao.createSearchBuilder()).thenReturn(sb);
+        when(sb.entity()).thenReturn(Mockito.mock(BackupOfferingVO.class));
+        Account account = Mockito.mock(Account.class);
+        when(account.getType()).thenReturn(Account.Type.NORMAL);
+        when(account.getDomainId()).thenReturn(3L);
+        DomainVO otherDomain = Mockito.mock(DomainVO.class);
+        when(domainDao.findById(4L)).thenReturn(otherDomain);
+        Mockito.doThrow(new PermissionDeniedException("denied")).when(accountManager).checkAccess(account, otherDomain);
+
+        try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
+            CallContext contextMock = Mockito.mock(CallContext.class);
+            mockedCallContext.when(CallContext::current).thenReturn(contextMock);
+            when(contextMock.getCallingAccount()).thenReturn(account);
+            Assert.assertThrows(PermissionDeniedException.class, () -> backupManager.listBackupOfferings(cmd));
+            verify(backupOfferingDao, Mockito.never()).searchAndCount(Mockito.any(), Mockito.any());
+        }
+    }
+
+    @Test
+    public void testListBackupOfferingByIdHidesOfferingsOfOtherDomains() {
+        BackupOfferingVO restricted = createMockOffering(1L, "Other Customer Offering");
+        BackupOfferingVO open = createMockOffering(2L, "Open Offering");
+        when(backupOfferingDao.findById(1L)).thenReturn(restricted);
+        when(backupOfferingDao.findById(2L)).thenReturn(open);
+        when(backupOfferingDetailsDao.findDomainIds(1L)).thenReturn(List.of(4L));
+        when(backupOfferingDetailsDao.findDomainIds(2L)).thenReturn(Collections.emptyList());
+        when(domainDao.isChildDomain(4L, 3L)).thenReturn(false);
+        Account user = Mockito.mock(Account.class);
+        when(user.getType()).thenReturn(Account.Type.NORMAL);
+        when(user.getDomainId()).thenReturn(3L);
+        Account admin = Mockito.mock(Account.class);
+        when(admin.getType()).thenReturn(Account.Type.ADMIN);
+
+        try (MockedStatic<CallContext> mockedCallContext = Mockito.mockStatic(CallContext.class)) {
+            CallContext contextMock = Mockito.mock(CallContext.class);
+            mockedCallContext.when(CallContext::current).thenReturn(contextMock);
+            when(contextMock.getCallingAccount()).thenReturn(user);
+            ListBackupOfferingsCmd byRestricted = Mockito.mock(ListBackupOfferingsCmd.class);
+            when(byRestricted.getOfferingId()).thenReturn(1L);
+            CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () -> backupManager.listBackupOfferings(byRestricted));
+            assertEquals("Offering ID 1 does not exist", e.getMessage());
+            ListBackupOfferingsCmd byOpen = Mockito.mock(ListBackupOfferingsCmd.class);
+            when(byOpen.getOfferingId()).thenReturn(2L);
+            assertEquals("Open Offering", backupManager.listBackupOfferings(byOpen).first().get(0).getName());
+
+            when(contextMock.getCallingAccount()).thenReturn(admin);
+            assertEquals("Other Customer Offering", backupManager.listBackupOfferings(byRestricted).first().get(0).getName());
         }
     }
 
