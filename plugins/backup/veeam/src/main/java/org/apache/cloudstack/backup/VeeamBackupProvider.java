@@ -277,15 +277,16 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     }
 
     /**
-     * "CS: &lt;domain&gt; - &lt;instance name&gt;", within Veeam's 40 characters: says which customer the job bills to
+     * "CS - &lt;domain&gt; - &lt;instance name&gt;", within Veeam's 40 characters: says which customer the job bills to
      * (VSPC assigns jobs to companies) and which instance it protects. The job itself is found by the instance UUID
      * in its description, so names may repeat and may change with the instance or domain.
      */
     protected String instanceJobName(final VirtualMachine vm) {
         com.cloud.domain.DomainVO domain = domainDao.findById(vm.getDomainId());
         String name = StringUtils.defaultIfBlank(vm.getHostName(), vm.getInstanceName());
-        String customer = StringUtils.left(domain == null ? "?" : domain.getName(), 16);
-        return StringUtils.left("CS: " + customer + " - " + name, 40);
+        String customer = StringUtils.left(domain == null ? "unknown" : domain.getName(), 16);
+        // Veeam refuses these characters (and line feeds) in job names: CMCO.net.au becomes CMCO-net-au.
+        return StringUtils.left("CS - " + customer + " - " + name, 40).replaceAll("[~\"#%&*:<>!?/\\\\{|}.'`$\\r\\n]", "-");
     }
 
     private static String instanceJobDescription(final VirtualMachine vm, final String template) {

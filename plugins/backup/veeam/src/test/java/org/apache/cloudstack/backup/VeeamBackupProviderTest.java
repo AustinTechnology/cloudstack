@@ -159,4 +159,17 @@ public class VeeamBackupProviderTest {
         backupProvider.writeProxmoxSchedule(settings, null, awst);
         assertEquals(false, settings.at("/scheduleSettings/enabled").asBoolean());
     }
+
+    /** Job names carry the customer's domain and the instance, without the characters Veeam refuses. */
+    @Test
+    public void instanceJobNameIsVeeamSafe() {
+        com.cloud.domain.dao.DomainDao domains = Mockito.mock(com.cloud.domain.dao.DomainDao.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(backupProvider, "domainDao", domains);
+        com.cloud.domain.DomainVO domain = new com.cloud.domain.DomainVO("CMCO.net.au", 1L, 1L, null);
+        Mockito.when(domains.findById(7L)).thenReturn(domain);
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vm.getDomainId()).thenReturn(7L);
+        Mockito.when(vm.getHostName()).thenReturn("web01.cmco:prod");
+        assertEquals("CS - CMCO-net-au - web01-cmco-prod", backupProvider.instanceJobName(vm));
+    }
 }

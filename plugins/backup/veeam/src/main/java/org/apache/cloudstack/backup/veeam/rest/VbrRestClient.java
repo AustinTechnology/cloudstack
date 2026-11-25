@@ -522,7 +522,9 @@ public class VbrRestClient {
             }
             if (status < 200 || status >= 300) {
                 // Veeam error bodies carry errorCode/message only, never credentials.
-                String message = StringUtils.isBlank(body) ? "" : MAPPER.readTree(body).path("message").asText("");
+                // Public REST errors carry "message"; the plug-ins' (RFC 9110 problem details) carry "detail" and "title".
+                JsonNode error = StringUtils.isBlank(body) ? MAPPER.createObjectNode() : MAPPER.readTree(body);
+                String message = StringUtils.firstNonBlank(error.path("message").asText(""), error.path("detail").asText(""), error.path("title").asText(""), "");
                 throw new CloudRuntimeException(String.format("Veeam REST API %s failed with HTTP %d %s", what, status, message).trim());
             }
             return StringUtils.isBlank(body) ? MAPPER.createObjectNode() : MAPPER.readTree(body);
