@@ -343,12 +343,12 @@ public class VbrRestClient {
 
     /** The Proxmox nodes of the cluster a Veeam cluster id names (id, name). */
     public JsonNode listProxmoxNodes(String clusterId) {
-        return send(new HttpGet(url(PROXMOX_PLUGIN + "/proxmox/clusters/" + enc(clusterId) + "/nodes", null)), null);
+        return results(send(new HttpGet(url(PROXMOX_PLUGIN + "/proxmox/clusters/" + enc(clusterId) + "/nodes", null)), null));
     }
 
     /** Storage of a node that Instant Recovery can run disks from (directory-type storage holding qcow2): id, freeSpace. */
     public JsonNode listProxmoxInstantRecoveryStorage(String nodeId) {
-        return send(new HttpGet(url(PROXMOX_PLUGIN + "/proxmox/clusters/" + enc(nodeId) + "/instantRecoveryCompatibleStorageContainers", null)), null);
+        return results(send(new HttpGet(url(PROXMOX_PLUGIN + "/proxmox/clusters/" + enc(nodeId) + "/instantRecoveryCompatibleStorageContainers", null)), null));
     }
 
     /** Starts an Instant Recovery; returns the id of its restore session, which the migration and stop calls take. */
@@ -377,6 +377,11 @@ public class VbrRestClient {
     /** A migration: state Running, then Finished with result Success or Failed. */
     public Session getProxmoxInstantRecoveryMigration(String migrationId) {
         return pluginSession(send(new HttpGet(url(PROXMOX_PLUGIN + "/instantRecovery/migrations/" + enc(migrationId), null)), null));
+    }
+
+    /** The plug-in answers lists as {"results": [...]}; some calls as a bare array. */
+    private static JsonNode results(JsonNode n) {
+        return n.has("results") ? n.get("results") : n;
     }
 
     private Session pluginSession(JsonNode n) {
