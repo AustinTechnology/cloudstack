@@ -38,6 +38,7 @@ import org.apache.http.HttpHeaders;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpEntityEnclosingRequestBase;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
@@ -269,6 +270,136 @@ public class VbrRestClient {
             }
         }
         return s;
+    }
+
+    /** The plug-in's jobs (with their full settings), or the one with this exact name; null when none has it. */
+    public JsonNode findProxmoxJobByName(String name) {
+        JsonNode page = send(new HttpGet(url(PROXMOX_PLUGIN + "/jobs", Map.of("limit", "1000", "offset", "0"))), null);
+        for (JsonNode job : page.path("results")) {
+            if (name.equals(text(job, "name"))) {
+                return job;
+            }
+        }
+        return null;
+    }
+
+    /** Clones a plug-in job: Veeam names the copy "&lt;name&gt;_clone1" and leaves it disabled. Returns the new job's id. */
+    public String cloneProxmoxJob(String jobId) {
+        String id = text(send(new HttpPost(url(PROXMOX_PLUGIN + "/jobs/" + enc(jobId) + "/clone", null)), "{}"), "id");
+        if (StringUtils.isBlank(id)) {
+            throw new CloudRuntimeException("The Veeam Proxmox plug-in returned no id for the cloned job");
+        }
+        return id;
+    }
+
+    public ObjectNode getProxmoxJobSettings(String jobId) {
+        return (ObjectNode) send(new HttpGet(url(PROXMOX_PLUGIN + "/jobs/" + enc(jobId) + "/settings", null)), null);
+    }
+
+    /** Replaces a plug-in job's settings. Veeam refuses the GFS begin times it returns, so they are left out. Re-enables the job. */
+    public void putProxmoxJobSettings(String jobId, ObjectNode settings) {
+        for (JsonNode period : settings.path("gfsSettings")) {
+            if (period instanceof ObjectNode) {
+                ((ObjectNode) period).remove("beginTimeUtc");
+            }
+        }
+        send(new HttpPut(url(PROXMOX_PLUGIN + "/jobs/" + enc(jobId) + "/settings", null)), settings.toString());
+    }
+
+    public void enableProxmoxJob(String jobId) {
+        send(new HttpPost(url(PROXMOX_PLUGIN + "/jobs/" + enc(jobId) + "/enable", null)), "{}");
+    }
+
+    /** Deletes a plug-in job. Its backups stay in the repository. */
+    public void deleteProxmoxJob(String jobId) {
+        send(new HttpDelete(url(PROXMOX_PLUGIN + "/jobs/" + enc(jobId), null)), null);
+    }
+
+    /** The plug-in's inventory object of a Proxmox VM (id "&lt;SMBIOS UUID&gt;:&lt;VMID&gt;"), as a job includes it; null if Veeam does not list it. */
+    public ObjectNode findProxmoxVm(String uuid, String vmid) {
+        String wanted = uuid.toLowerCase() + ":" + vmid;
+        JsonNode page = send(new HttpGet(url(PROXMOX_PLUGIN + "/inventory", Map.of("limit", "10000", "offset", "0"))), null);
+        for (JsonNode o : page.path("results")) {
+            if ("VirtualMachine".equals(text(o, "type")) && wanted.equalsIgnoreCase(text(o, "id"))) {
+                ObjectNode vm = MAPPER.createObjectNode();
+                for (String field : new String[]{"id", "clusterId", "type", "name"}) {
+                    vm.set(field, o.get(field));
+                }
+                return vm;
+            }
+        }
+        return null;
+    }
+
+    /** Asks Veeam to read the Proxmox inventory again (a new or moved VM is not in it until then). */
+    public void rescanProxmoxInventory() {
+        send(new HttpPost(url(PROXMOX_PLUGIN + "/inventory/rescan", null)), "{}");
+    }
+
+    /** What the restore point holds: name, node (subClusterId) and disks (id, busType, index, size, storageContainerId). */
+    public JsonNode getProxmoxRestorePointMetadata(String restorePointId) {
+        return send(new HttpGet(url(PROXMOX_PLUGIN + "/restorePoints/" + enc(restorePointId) + "/metadata", null)), null);
+    }
+
+    /** The Proxmox nodes of the cluster a Veeam cluster id names (id, name). */
+    public JsonNode listProxmoxNodes(String clusterId) {
+        return send(new HttpGet(url(PROXMOX_PLUGIN + "/proxmox/clusters/" + enc(clusterId) + "/nodes", null)), null);
+    }
+
+    /** Storage of a node that Instant Recovery can run disks from (directory-type storage holding qcow2): id, freeSpace. */
+    public JsonNode listProxmoxInstantRecoveryStorage(String nodeId) {
+        return send(new HttpGet(url(PROXMOX_PLUGIN + "/proxmox/clusters/" + enc(nodeId) + "/instantRecoveryCompatibleStorageContainers", null)), null);
+    }
+
+    /** Starts an Instant Recovery; returns the id of its restore session, which the migration and stop calls take. */
+    public String startProxmoxInstantRecovery(ObjectNode body) {
+        String id = text(send(new HttpPost(url(PROXMOX_PLUGIN + "/instantRecovery", null)), body.toString()), "sessionId");
+        if (StringUtils.isBlank(id)) {
+            throw new CloudRuntimeException("The Veeam Proxmox plug-in started no Instant Recovery session");
+        }
+        return id;
+    }
+
+    /** An Instant Recovery session: state Running while the VM runs from the backup; status/result. */
+    public Session getProxmoxInstantRecovery(String sessionId) {
+        return pluginSession(send(new HttpGet(url(PROXMOX_PLUGIN + "/instantRecovery/sessions/" + enc(sessionId), null)), null));
+    }
+
+    /** Starts copying an Instant Recovery VM's disks off the backup (Veeam's migration); returns the migration's id. Can be retried. */
+    public String startProxmoxInstantRecoveryMigration(String sessionId) {
+        String id = text(send(new HttpPost(url(PROXMOX_PLUGIN + "/instantRecovery/sessions/" + enc(sessionId) + "/startMigration", null)), "{}"), "sessionId");
+        if (StringUtils.isBlank(id)) {
+            throw new CloudRuntimeException("The Veeam Proxmox plug-in started no migration");
+        }
+        return id;
+    }
+
+    /** A migration: state Running, then Finished with result Success or Failed. */
+    public Session getProxmoxInstantRecoveryMigration(String migrationId) {
+        return pluginSession(send(new HttpGet(url(PROXMOX_PLUGIN + "/instantRecovery/migrations/" + enc(migrationId), null)), null));
+    }
+
+    private Session pluginSession(JsonNode n) {
+        Session s = new Session();
+        s.id = text(n, "id"); s.state = text(n, "state"); s.result = text(n, "result");
+        s.message = "Success".equalsIgnoreCase(text(n, "status")) || "Running".equalsIgnoreCase(text(n, "status")) ? null : text(n, "status");
+        return s;
+    }
+
+    // ---- Hyper-V jobs (public REST) ----
+
+    /** Clones a job; returns the copy as Veeam returns it (disabled, named after the original). */
+    public JsonNode cloneJob(String jobId) {
+        return send(new HttpPost(url("/api/v1/jobs/" + enc(jobId) + "/clone", null)), "{}");
+    }
+
+    /** Deletes a job. Its backups stay in the repository. */
+    public void deleteJob(String jobId) {
+        send(new HttpDelete(url("/api/v1/jobs/" + enc(jobId), null)), null);
+    }
+
+    public void enableJob(String jobId) {
+        send(new HttpPost(url("/api/v1/jobs/" + enc(jobId) + "/enable", null)), "{}");
     }
 
     // ---- transport ----

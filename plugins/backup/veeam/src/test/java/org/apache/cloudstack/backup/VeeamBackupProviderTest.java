@@ -129,4 +129,17 @@ public class VeeamBackupProviderTest {
         Mockito.verify(backupDao, Mockito.times(1)).remove(2l);
         assertEquals(true, result);
     }
+
+    /** A template job's Veeam schedule becomes the instance's first CloudStack schedule (minute:hour[:day]). */
+    @Test
+    public void scheduleOfProxmoxJobMapsTheTemplateSchedule() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
+        String daily = "{\"enabled\":true,\"type\":\"Weekly\",\"weekly\":{\"startTime\":\"22:05\",\"configuredDays\":\"EveryDay\",\"selectedDays\":[\"Monday\",\"Sunday\"]}}";
+        assertEquals(new com.cloud.utils.Pair<>(com.cloud.utils.DateUtil.IntervalType.DAILY, "05:22"), backupProvider.scheduleOfProxmoxJob(json.readTree(daily)));
+        String weekly = "{\"enabled\":true,\"type\":\"Weekly\",\"weekly\":{\"startTime\":\"10:00\",\"configuredDays\":\"SelectedDays\",\"selectedDays\":[\"Saturday\"]}}";
+        assertEquals(new com.cloud.utils.Pair<>(com.cloud.utils.DateUtil.IntervalType.WEEKLY, "00:10:7"), backupProvider.scheduleOfProxmoxJob(json.readTree(weekly)));
+        String monthly = "{\"enabled\":true,\"type\":\"Monthly\",\"monthly\":{\"startTime\":\"01:30\",\"configuredWeekOrDay\":\"Day\",\"dayOfMonth\":3}}";
+        assertEquals(new com.cloud.utils.Pair<>(com.cloud.utils.DateUtil.IntervalType.MONTHLY, "30:01:3"), backupProvider.scheduleOfProxmoxJob(json.readTree(monthly)));
+        assertEquals(null, backupProvider.scheduleOfProxmoxJob(json.readTree("{\"enabled\":false,\"type\":\"Weekly\"}")));
+    }
 }

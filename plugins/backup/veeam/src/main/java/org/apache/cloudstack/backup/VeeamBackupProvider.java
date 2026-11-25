@@ -84,6 +84,12 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     public static final String POOL_DETAIL = "veeam.proxmox.pool";
     /** Instance detail: the Veeam (Hyper-V) job the provider added the instance to, for removal after the offering is gone. */
     public static final String JOB_DETAIL = "veeam.job";
+    /** Instance detail: the instance's own Veeam job (public REST id), cloned from its offering's template job. */
+    public static final String VM_JOB_DETAIL = "veeam.vmjob";
+    /** Instance detail: the same job's id in the Veeam Proxmox plug-in, which creates, edits and deletes Proxmox jobs. */
+    public static final String PVE_JOB_DETAIL = "veeam.proxmox.job";
+    /** Instance detail: a quick restore (Veeam Instant Recovery) that is still being finished, as JSON. */
+    public static final String QUICK_RESTORE_DETAIL = "veeam.quickrestore";
     private static final Set<String> REST_JOB_TYPES = Set.of("ProxmoxBackupJob", "HyperVBackup");
     private static final String UUID_PATTERN = "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
 
@@ -145,8 +151,24 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             "The Proxmox pool the domain's instances join when they are assigned a Veeam backup offering: the pool the "
                     + "offering's Veeam job protects. Empty means a pool named like the domain.", true, ConfigKey.Scope.Domain);
 
+    private ConfigKey<String> VeeamTemplatePrefix = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.template.prefix", "CloudStack template",
+            "A Veeam job whose name starts with this is a template: each instance assigned its offering gets its own copy "
+                    + "of the job, which CloudStack schedules and starts. Empty turns templates off.", true, ConfigKey.Scope.Zone);
+
+    private ConfigKey<String> VeeamQuickRestoreStorage = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.proxmox.quickrestore.storage", "local",
+            "The Proxmox storage (directory or NFS, holding qcow2) a quick restore runs the instance's disks from while "
+                    + "Veeam copies them off the backup; afterwards they move back to their own storage.", true, ConfigKey.Scope.Zone);
+
     @Inject
     private ExtensionsManager extensionsManager;
+    @Inject
+    private org.apache.cloudstack.backup.dao.BackupOfferingDao backupOfferingDao;
+    @Inject
+    private org.apache.cloudstack.backup.dao.BackupScheduleDao backupScheduleDao;
+    @Inject
+    private com.cloud.storage.dao.VolumeDetailsDao volumeDetailsDao;
     @Inject
     private org.apache.cloudstack.extension.ExtensionHelper extensionHelper;
     @Inject
@@ -237,6 +259,25 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         }
     }
 
+    /** Whether the offering's Veeam job is a template: instances get their own copy of it. */
+    protected boolean isTemplateOffering(final BackupOffering offering) {
+        String prefix = offering == null ? null : StringUtils.trimToNull(VeeamTemplatePrefix.valueIn(offering.getZoneId()));
+        VbrRestClient.JobState state = prefix == null ? null : restJobState(offering.getZoneId(), offering.getExternalId());
+        return state != null && state.name != null && state.name.startsWith(prefix);
+    }
+
+    /** The Veeam job that backs the instance up: its own job when it has one, else its offering's job. */
+    protected String jobIdOf(final VirtualMachine vm) {
+        VMInstanceDetailVO own = vmInstanceDetailsDao.findDetail(vm.getId(), VM_JOB_DETAIL);
+        return own != null && StringUtils.isNotBlank(own.getValue()) ? own.getValue() : vm.getBackupExternalId();
+    }
+
+    /** "&lt;name&gt; (&lt;first 8 of the instance UUID&gt;)", within Veeam's 40 characters. */
+    private static String instanceJobName(final VirtualMachine vm) {
+        String name = StringUtils.defaultIfBlank(vm.getHostName(), vm.getInstanceName());
+        return StringUtils.left(name, 29) + " (" + vm.getUuid().substring(0, 8) + ")";
+    }
+
     private String proxmoxPoolFor(final VirtualMachine vm) {
         String pool = StringUtils.trimToNull(VeeamProxmoxPool.valueInDomain(vm.getDomainId()));
         if (pool == null) {
@@ -288,6 +329,10 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     }
 
     private String addMembership(final VMInstanceVO vm) {
+        BackupOffering offering = vm.getBackupOfferingId() == null ? null : backupOfferingDao.findById(vm.getBackupOfferingId());
+        if (isTemplateOffering(offering)) {
+            return createInstanceJob(vm, offering);
+        }
         if (usesPools(vm)) {
             String pool = proxmoxPoolFor(vm);
             if (pool == null) {
@@ -319,6 +364,9 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     }
 
     private String removeMembership(final VMInstanceVO vm) {
+        if (vmInstanceDetailsDao.findDetail(vm.getId(), VM_JOB_DETAIL) != null) {
+            return deleteInstanceJob(vm);
+        }
         if (usesPools(vm)) {
             VMInstanceDetailVO recorded = vmInstanceDetailsDao.findDetail(vm.getId(), POOL_DETAIL);
             String pool = recorded != null ? recorded.getValue() : proxmoxPoolFor(vm);
@@ -353,6 +401,172 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         return "removed from Veeam job " + model.path("name").asText();
     }
 
+    /**
+     * Gives the instance its own Veeam job: a copy of the offering's template job (repository, retention, processing)
+     * that holds only this instance and has no Veeam schedule, so CloudStack's schedules and Backup now start it.
+     * The template's schedule becomes the instance's first CloudStack schedule. Safe to repeat: a job already made
+     * under the instance's name is reused, so a sync that failed half way finishes it.
+     */
+    private String createInstanceJob(final VMInstanceVO vm, final BackupOffering offering) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        VbrRestClient.JobState template = restJobState(vm.getDataCenterId(), offering.getExternalId());
+        String name = instanceJobName(vm);
+        String description = String.format("CloudStack instance %s (%s), from %s. Made and deleted by CloudStack.",
+                vm.getHostName(), vm.getUuid(), template.name);
+        String publicId = null;
+        if (usesPools(vm)) {
+            String uuid = requireBackupUuid(vm);
+            VMInstanceDetailVO vmid = vmInstanceDetailsDao.findDetail(vm.getId(), "proxmox_vmid");
+            if (vmid == null || StringUtils.isBlank(vmid.getValue())) {
+                throw new CloudRuntimeException("The instance has no Proxmox VMID recorded");
+            }
+            com.fasterxml.jackson.databind.JsonNode job = client.findProxmoxJobByName(name);
+            String pveId;
+            if (job == null) {
+                com.fasterxml.jackson.databind.node.ObjectNode object = client.findProxmoxVm(uuid, vmid.getValue());
+                if (object == null) {
+                    client.rescanProxmoxInventory();
+                    throw new CloudRuntimeException("Veeam does not list the VM yet; it was asked to read the Proxmox inventory again");
+                }
+                com.fasterxml.jackson.databind.JsonNode templateJob = client.findProxmoxJobByName(template.name);
+                if (templateJob == null) {
+                    throw new CloudRuntimeException("The Veeam Proxmox plug-in does not list the template job " + template.name);
+                }
+                pveId = client.cloneProxmoxJob(templateJob.path("id").asText());
+                com.fasterxml.jackson.databind.node.ObjectNode settings = client.getProxmoxJobSettings(pveId);
+                settings.put("name", name);
+                settings.put("description", description);
+                settings.putObject("includes").putArray("objects").add(object);
+                settings.putObject("excludes").putArray("objects");
+                settings.with("scheduleSettings").put("enabled", false);
+                client.putProxmoxJobSettings(pveId, settings);
+                client.enableProxmoxJob(pveId);
+                seedSchedule(vm, scheduleOfProxmoxJob(templateJob.path("settings").path("scheduleSettings")));
+                logger.info("Created Veeam job {} for {} from template {}", name, vm, template.name);
+            } else {
+                pveId = job.path("id").asText();
+            }
+            vmInstanceDetailsDao.addDetail(vm.getId(), PVE_JOB_DETAIL, pveId, false);
+            for (VbrRestClient.JobState state : client.listJobStates()) {
+                if (name.equals(state.name)) {
+                    publicId = state.id;
+                }
+            }
+            if (publicId == null) {
+                throw new CloudRuntimeException("Veeam does not list the new job " + name + " yet");
+            }
+        } else {
+            for (VbrRestClient.JobState state : client.listJobStates()) {
+                if (name.equals(state.name)) {
+                    publicId = state.id;
+                }
+            }
+            if (publicId == null) {
+                String uuid = requireBackupUuid(vm);
+                com.fasterxml.jackson.databind.JsonNode object = client.findHyperVVm(uuid);
+                if (object == null) {
+                    throw new CloudRuntimeException("Veeam does not see a Hyper-V VM with GUID " + uuid);
+                }
+                publicId = client.cloneJob(offering.getExternalId()).path("id").asText();
+                com.fasterxml.jackson.databind.node.ObjectNode job = (com.fasterxml.jackson.databind.node.ObjectNode) client.getJob(publicId);
+                com.fasterxml.jackson.databind.JsonNode templateSchedule = job.path("schedule").deepCopy();
+                job.put("name", name);
+                job.put("description", description);
+                com.fasterxml.jackson.databind.node.ObjectNode machines = job.with("virtualMachines");
+                machines.putArray("includes").add(object);
+                machines.with("excludes").putArray("vms");
+                job.with("schedule").put("runAutomatically", false);
+                client.putJob(publicId, job);
+                client.enableJob(publicId);
+                seedSchedule(vm, scheduleOfHyperVJob(templateSchedule));
+                logger.info("Created Veeam job {} for {} from template {}", name, vm, template.name);
+            }
+        }
+        vmInstanceDetailsDao.addDetail(vm.getId(), VM_JOB_DETAIL, publicId, false);
+        return "in its own Veeam job " + name + ", made from template " + template.name;
+    }
+
+    /** Deletes the instance's own Veeam job. Its restore points stay in the repository until removed in Veeam. */
+    private String deleteInstanceJob(final VMInstanceVO vm) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        VMInstanceDetailVO publicId = vmInstanceDetailsDao.findDetail(vm.getId(), VM_JOB_DETAIL);
+        VMInstanceDetailVO pveId = vmInstanceDetailsDao.findDetail(vm.getId(), PVE_JOB_DETAIL);
+        VbrRestClient.JobState state = restJobState(vm.getDataCenterId(), publicId.getValue());
+        if (pveId != null) {
+            client.deleteProxmoxJob(pveId.getValue());
+        } else if (state != null) {
+            client.deleteJob(publicId.getValue());
+        }
+        vmInstanceDetailsDao.removeDetail(vm.getId(), VM_JOB_DETAIL);
+        vmInstanceDetailsDao.removeDetail(vm.getId(), PVE_JOB_DETAIL);
+        return "its Veeam job " + (state == null ? publicId.getValue() : state.name) + " was deleted (its restore points stay in Veeam)";
+    }
+
+    /** One CloudStack schedule from a Proxmox plug-in job schedule, or null when it has none CloudStack can express. */
+    protected Pair<com.cloud.utils.DateUtil.IntervalType, String> scheduleOfProxmoxJob(final com.fasterxml.jackson.databind.JsonNode schedule) {
+        if (!schedule.path("enabled").asBoolean(false)) {
+            return null;
+        }
+        String type = schedule.path("type").asText();
+        if ("Weekly".equals(type)) {
+            String[] time = schedule.path("weekly").path("startTime").asText("").split(":");
+            if (time.length < 2) {
+                return null;
+            }
+            com.fasterxml.jackson.databind.JsonNode days = schedule.path("weekly").path("selectedDays");
+            if (!"EveryDay".equals(schedule.path("weekly").path("configuredDays").asText()) && days.size() == 1) {
+                int day = java.time.DayOfWeek.valueOf(days.get(0).asText().toUpperCase()).getValue() % 7 + 1;
+                return new Pair<>(com.cloud.utils.DateUtil.IntervalType.WEEKLY, String.format("%s:%s:%d", time[1], time[0], day));
+            }
+            return new Pair<>(com.cloud.utils.DateUtil.IntervalType.DAILY, String.format("%s:%s", time[1], time[0]));
+        }
+        if ("Monthly".equals(type) && "Day".equals(schedule.path("monthly").path("configuredWeekOrDay").asText())) {
+            String[] time = schedule.path("monthly").path("startTime").asText("").split(":");
+            if (time.length >= 2) {
+                return new Pair<>(com.cloud.utils.DateUtil.IntervalType.MONTHLY,
+                        String.format("%s:%s:%d", time[1], time[0], schedule.path("monthly").path("dayOfMonth").asInt(1)));
+            }
+        }
+        if ("Periodic".equals(type) && "EveryHour".equals(schedule.path("periodic").path("mode").asText())
+                && schedule.path("periodic").path("interval").asInt(1) == 1) {
+            return new Pair<>(com.cloud.utils.DateUtil.IntervalType.HOURLY, String.valueOf(schedule.path("periodic").path("startTimeWithinAnHour").asInt(0)));
+        }
+        return null;
+    }
+
+    /** One CloudStack schedule from a Hyper-V job schedule (daily only), or null. */
+    protected Pair<com.cloud.utils.DateUtil.IntervalType, String> scheduleOfHyperVJob(final com.fasterxml.jackson.databind.JsonNode schedule) {
+        com.fasterxml.jackson.databind.JsonNode daily = schedule.path("daily");
+        String[] time = daily.path("localTime").asText("").split(":");
+        if (!schedule.path("runAutomatically").asBoolean(false) || !daily.path("isEnabled").asBoolean(false) || time.length < 2) {
+            return null;
+        }
+        return new Pair<>(com.cloud.utils.DateUtil.IntervalType.DAILY, String.format("%s:%s", time[1], time[0]));
+    }
+
+    /**
+     * Records the template's schedule as the instance's first CloudStack schedule, in the Veeam server's time zone (taken
+     * from any scheduled job's next run), unless the instance has schedules already.
+     */
+    private void seedSchedule(final VMInstanceVO vm, final Pair<com.cloud.utils.DateUtil.IntervalType, String> schedule) {
+        if (schedule == null || !backupScheduleDao.listByVM(vm.getId()).isEmpty()) {
+            return;
+        }
+        String timezone = "GMT";
+        Map<String, VbrRestClient.JobState> states = restJobStates.get(vm.getDataCenterId());
+        for (VbrRestClient.JobState state : states == null ? new ArrayList<VbrRestClient.JobState>() : states.values()) {
+            if (StringUtils.isNotBlank(state.nextRun)) {
+                java.time.ZoneOffset offset = java.time.OffsetDateTime.parse(state.nextRun).getOffset();
+                timezone = "GMT" + (offset.getTotalSeconds() == 0 ? "" : offset.getId());
+                break;
+            }
+        }
+        java.util.Date next = com.cloud.utils.DateUtil.getNextRunTime(schedule.first(), schedule.second(), timezone, null);
+        backupScheduleDao.persist(new BackupScheduleVO(vm.getId(), schedule.first(), schedule.second(), timezone, next, 0, null,
+                vm.getAccountId(), vm.getDomainId(), false));
+        logger.info("Scheduled the backups of {} {} at {} ({}), as its template job does", vm, schedule.first(), schedule.second(), timezone);
+    }
+
     /** The extension's own error message (its JSON "error"), not the whole answer. */
     private static String extensionError(final Answer answer) {
         if (answer == null) {
@@ -383,7 +597,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         List<VbrRestorePoints.Instance> instances = new ArrayList<>();
         for (VMInstanceVO vm : vmInstanceDao.listByZoneAndBackupOffering(zoneId, null)) {
             if (isExternal(vm)) {
-                instances.add(new VbrRestorePoints.Instance(vm.getId(), getBackupUuid(vm), vm.getBackupExternalId()));
+                instances.add(new VbrRestorePoints.Instance(vm.getId(), getBackupUuid(vm), jobIdOf(vm)));
             }
         }
         if (!instances.isEmpty()) {
@@ -536,7 +750,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         if (isExternal(vm)) {
             VbrRestClient client = getRestClient(vm.getDataCenterId());
             VbrRestClient.Session session = null;
-            if (isDisabled(restJobState(vm.getDataCenterId(), vm.getBackupExternalId()))) {
+            String jobId = jobIdOf(vm);
+            if (isDisabled(restJobState(vm.getDataCenterId(), jobId))) {
                 throw new CloudRuntimeException("The Veeam job of this instance is disabled in Veeam");
             }
             if (!usesPools(vm)) {
@@ -555,17 +770,17 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 // Veeam has no per-VM ad-hoc backup for Proxmox; run the instance's job (incremental). Instances
                 // sharing a job ask together when their CloudStack schedules fall due: one run serves them all.
                 for (VbrRestClient.JobState state : client.listJobStates()) {
-                    if (state.id.equals(vm.getBackupExternalId()) && isDisabled(state)) {
+                    if (state.id.equals(jobId) && isDisabled(state)) {
                         throw new CloudRuntimeException("The Veeam job " + state.name + " of this instance is disabled in Veeam");
                     }
-                    if (state.id.equals(vm.getBackupExternalId()) && !"Stopped".equalsIgnoreCase(state.status)) {
+                    if (state.id.equals(jobId) && !"Stopped".equalsIgnoreCase(state.status)) {
                         logger.info("Veeam job {} for {} is already running ({}); not starting it again", state.name, vm, state.status);
                         return new Pair<>(true, null);
                     }
                 }
-                session = client.startJob(vm.getBackupExternalId(), false);
+                session = client.startJob(jobId, false);
             }
-            logger.info("Started Veeam backup for {} (job {}): session {}", vm, vm.getBackupExternalId(), session.id);
+            logger.info("Started Veeam backup for {} (job {}): session {}", vm, jobId, session.id);
             return new Pair<>(session.id != null, null);
         }
         final VeeamClient client = getClient(vm.getDataCenterId());
@@ -609,7 +824,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     @Override
     public boolean restoreVMFromBackup(VirtualMachine vm, Backup backup, boolean quickRestore, Long hostId) {
         if (isExternal(vm)) {
-            return restoreExternalInPlace(vmInstanceDao.findById(vm.getId()), backup);
+            return restoreExternalInPlace(vmInstanceDao.findById(vm.getId()), backup, quickRestore);
         }
         final String restorePointId = backup.getExternalId();
         try {
@@ -627,10 +842,19 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
      * Veeam session, up to backup.plugin.veeam.restore.timeout. A Proxmox VM goes back into its backup pool after the
      * restore, in case the restored configuration does not carry it.
      */
-    private boolean restoreExternalInPlace(final VMInstanceVO vm, final Backup backup) {
+    private boolean restoreExternalInPlace(final VMInstanceVO vm, final Backup backup, final boolean quick) {
         VbrRestClient client = getRestClient(vm.getDataCenterId());
         String reason = String.format("CloudStack restore of instance %s (%s) from backup %s", vm.getHostName(), vm.getUuid(), backup.getUuid());
         boolean proxmox = usesPools(vm);
+        if (vmInstanceDetailsDao.findDetail(vm.getId(), QUICK_RESTORE_DETAIL) != null) {
+            throw new CloudRuntimeException("A quick restore of this instance is still being finished; restore it again once that is done");
+        }
+        if (quick) {
+            if (!proxmox) {
+                throw new CloudRuntimeException("Quick restore is supported for Proxmox instances only; restore without it");
+            }
+            return startQuickRestore(vm, backup, client, reason);
+        }
         VbrRestClient.Session session;
         if (proxmox) {
             VMInstanceDetailVO vmid = vmInstanceDetailsDao.findDetail(vm.getId(), "proxmox_vmid");
@@ -677,6 +901,284 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             }
         }
         return true;
+    }
+
+    private static final Map<String, String> BUS_PREFIX = Map.of("Virtio", "virtio", "Scsi", "scsi", "Sata", "sata", "Ide", "ide", "Efi", "efidisk");
+
+    /**
+     * Quick restore of a stopped Proxmox instance through Veeam Instant Recovery: Veeam replaces the VM (same VMID, SMBIOS
+     * UUID and MAC) with one that runs from the backup, its disks qcow2 files on the quick-restore storage backed by the
+     * repository, and starts it. Returns once it runs. The backup sync then has Veeam copy the disks off the backup
+     * (its "migration") and moves each disk back to the storage it had in the backup; see {@link #finishQuickRestores}.
+     */
+    private boolean startQuickRestore(final VMInstanceVO vm, final Backup backup, final VbrRestClient client, final String reason) {
+        VMInstanceDetailVO vmid = vmInstanceDetailsDao.findDetail(vm.getId(), "proxmox_vmid");
+        if (vmid == null || StringUtils.isBlank(vmid.getValue())) {
+            throw new CloudRuntimeException("The instance has no Proxmox VMID recorded");
+        }
+        String sourceVmId = requireBackupUuid(vm).toLowerCase() + ":" + vmid.getValue();
+        String staging = StringUtils.trimToNull(VeeamQuickRestoreStorage.valueIn(vm.getDataCenterId()));
+        if (staging == null) {
+            throw new CloudRuntimeException("No quick-restore storage is set (backup.plugin.veeam.proxmox.quickrestore.storage)");
+        }
+        com.fasterxml.jackson.databind.JsonNode meta = client.getProxmoxRestorePointMetadata(backup.getExternalId());
+        String nodeId = proxmoxNodeIdOf(vm, client, meta);
+
+        com.fasterxml.jackson.databind.node.ArrayNode disks = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
+        JsonObject targets = new JsonObject();
+        long needed = 0;
+        for (com.fasterxml.jackson.databind.JsonNode disk : meta.path("disks")) {
+            String prefix = BUS_PREFIX.get(disk.path("busType").asText());
+            if (prefix == null || disk.path("isCdrom").asBoolean(false)) {
+                continue;
+            }
+            disks.addObject().put("diskId", disk.path("id").asText()).put("busType", disk.path("busType").asText())
+                    .put("index", disk.path("index").asInt()).put("storageContainerId", staging);
+            targets.addProperty(prefix + disk.path("index").asInt(), disk.path("storageContainerId").asText());
+            needed += disk.path("size").asLong(0);
+        }
+        if (disks.isEmpty()) {
+            throw new CloudRuntimeException("The restore point lists no disks");
+        }
+        // Veeam gives the VM a new, empty TPM state on the quick-restore storage when it had one; it goes with the EFI disk.
+        String tpmTarget = targets.has("efidisk0") ? targets.get("efidisk0").getAsString() : null;
+        if (tpmTarget != null) {
+            targets.addProperty("tpmstate0", tpmTarget);
+        }
+        long free = -1;
+        for (com.fasterxml.jackson.databind.JsonNode storage : client.listProxmoxInstantRecoveryStorage(nodeId)) {
+            if (staging.equals(storage.path("id").asText())) {
+                free = storage.path("freeSpace").asLong(0);
+            }
+        }
+        if (free < 0) {
+            throw new CloudRuntimeException(String.format("The instance's Proxmox node has no storage %s Veeam can run a quick restore from;"
+                    + " restore without quick restore", staging));
+        }
+        if (free < needed) {
+            throw new CloudRuntimeException(String.format("A quick restore needs %d GiB free on storage %s of the instance's node, which has %d GiB;"
+                    + " restore without quick restore", needed >> 30, staging, free >> 30));
+        }
+
+        com.fasterxml.jackson.databind.node.ObjectNode body = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+        body.put("sourceVmId", sourceVmId).put("targetVmClusterId", nodeId).put("targetVmId", sourceVmId)
+                .put("targetVmName", meta.path("name").asText()).put("sourceVmName", meta.path("name").asText())
+                .put("restoreToOriginal", true).put("forceDeleteExistingVm", true).put("restorePointId", backup.getExternalId())
+                .put("powerOnVmAfterRestore", true).put("disconnectNetworksAfterRestore", false).put("reason", reason);
+        body.set("diskSettings", disks);
+        String session = client.startProxmoxInstantRecovery(body);
+        logger.info("Veeam Instant Recovery of {} from restore point {} (backup {}), disks on {}: session {}", vm, backup.getExternalId(),
+                backup.getUuid(), staging, session);
+        JsonObject state = new JsonObject();
+        state.addProperty("session", session);
+        state.addProperty("phase", "publishing");
+        state.addProperty("staging", staging);
+        state.add("targets", targets);
+        vmInstanceDetailsDao.addDetail(vm.getId(), QUICK_RESTORE_DETAIL, state.toString(), false);
+
+        long deadline = System.currentTimeMillis() + VeeamRestoreTimeout.valueIn(vm.getDataCenterId()) * 1000L;
+        while (true) {
+            VbrRestClient.Session ir = null;
+            try {
+                ir = client.getProxmoxInstantRecovery(session);
+            } catch (CloudRuntimeException e) {
+                logger.debug("Veeam Instant Recovery session {} not readable this time: {}", session, e.getMessage());
+            }
+            if (ir != null && "Running".equalsIgnoreCase(ir.state) && !"Failed".equalsIgnoreCase(ir.result)) {
+                logger.info("{} runs from its backup (Instant Recovery session {}); the backup sync finishes the restore", vm, session);
+                return true;
+            }
+            if (ir != null && ("Failed".equalsIgnoreCase(ir.result) || "Stopped".equalsIgnoreCase(ir.state) || "Finished".equalsIgnoreCase(ir.state))) {
+                vmInstanceDetailsDao.removeDetail(vm.getId(), QUICK_RESTORE_DETAIL);
+                throw new CloudRuntimeException(String.format("Veeam Instant Recovery session %s ended %s %s; check the instance in Proxmox and the session in Veeam",
+                        session, ir.state, StringUtils.defaultString(ir.result)));
+            }
+            if (System.currentTimeMillis() > deadline) {
+                throw new CloudRuntimeException(String.format("Veeam Instant Recovery session %s has not started the instance after %ss; the backup sync keeps "
+                        + "following it", session, VeeamRestoreTimeout.valueIn(vm.getDataCenterId())));
+            }
+            try {
+                Thread.sleep(15000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CloudRuntimeException("Interrupted while waiting for Veeam Instant Recovery session " + session);
+            }
+        }
+    }
+
+    /** Veeam's id of the Proxmox node the instance is on now (the restore point's node when it has not moved). */
+    private String proxmoxNodeIdOf(final VMInstanceVO vm, final VbrRestClient client, final com.fasterxml.jackson.databind.JsonNode meta) {
+        Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
+        com.cloud.host.HostVO host = hostId == null ? null : hostDao.findById(hostId);
+        if (host != null) {
+            hostDao.loadDetails(host);
+        }
+        String node = host == null || host.getDetails() == null ? null : host.getDetails().get("External:node");
+        if (node == null || node.equals(meta.path("subClusterName").asText())) {
+            return meta.path("subClusterId").asText();
+        }
+        for (com.fasterxml.jackson.databind.JsonNode n : client.listProxmoxNodes(meta.path("clusterId").asText())) {
+            if (node.equals(n.path("name").asText())) {
+                return n.path("id").asText();
+            }
+        }
+        throw new CloudRuntimeException("Veeam does not list the instance's Proxmox node " + node);
+    }
+
+    /**
+     * Moves quick restores on, one step per instance per backup sync: once the instance runs from the backup, Veeam copies
+     * its disks off the backup (a failed copy is started again next sync); then each disk moves, online, from the
+     * quick-restore storage back to the storage it had in the backup, and CloudStack's volume records follow. A TPM state
+     * moves only while the instance is stopped, so it waits for the next stop. Calls Veeam and the extension; outside
+     * transactions only.
+     */
+    private void finishQuickRestores(final Long zoneId) {
+        for (VMInstanceDetailVO detail : vmInstanceDetailsDao.findDetails(QUICK_RESTORE_DETAIL)) {
+            VMInstanceVO vm = vmInstanceDao.findById(detail.getResourceId());
+            if (vm == null || vm.getState() == VirtualMachine.State.Expunging) {
+                vmInstanceDetailsDao.removeDetail(detail.getResourceId(), QUICK_RESTORE_DETAIL);
+                continue;
+            }
+            if (!zoneId.equals(vm.getDataCenterId())) {
+                continue;
+            }
+            JsonObject state = new JsonParser().parse(detail.getValue()).getAsJsonObject();
+            String before = state.toString();
+            try {
+                quickRestoreStep(vm, state);
+            } catch (RuntimeException e) {
+                logger.warn("Quick restore of {} ({}): {}", vm, state.get("phase").getAsString(), e.getMessage());
+                if (!state.has("error")) {
+                    state.addProperty("error", e.getMessage());
+                    quickRestoreEvent(vm, EventVO.LEVEL_ERROR, "Quick restore: " + e.getMessage() + " (retried each backup sync)");
+                }
+            }
+            if (state.has("done")) {
+                vmInstanceDetailsDao.removeDetail(vm.getId(), QUICK_RESTORE_DETAIL);
+            } else if (!state.toString().equals(before)) {
+                vmInstanceDetailsDao.addDetail(vm.getId(), QUICK_RESTORE_DETAIL, state.toString(), false);
+            }
+        }
+    }
+
+    private void quickRestoreStep(final VMInstanceVO vm, final JsonObject state) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        String phase = state.get("phase").getAsString();
+        if ("publishing".equals(phase)) {
+            VbrRestClient.Session ir = client.getProxmoxInstantRecovery(state.get("session").getAsString());
+            if ("Running".equalsIgnoreCase(ir.state)) {
+                state.addProperty("migration", client.startProxmoxInstantRecoveryMigration(state.get("session").getAsString()));
+                state.addProperty("phase", "migrating");
+                state.remove("error");
+                quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore: the instance runs from its backup; Veeam is copying its disks off the backup");
+            } else if ("Failed".equalsIgnoreCase(ir.result) || "Stopped".equalsIgnoreCase(ir.state) || "Finished".equalsIgnoreCase(ir.state)) {
+                state.addProperty("done", true);
+                quickRestoreEvent(vm, EventVO.LEVEL_ERROR, String.format("Quick restore: Veeam Instant Recovery session %s ended %s %s before its disks "
+                        + "were copied; check the instance in Proxmox", ir.id, ir.state, StringUtils.defaultString(ir.result)));
+            }
+            return;
+        }
+        if ("migrating".equals(phase)) {
+            VbrRestClient.Session migration = client.getProxmoxInstantRecoveryMigration(state.get("migration").getAsString());
+            if (!"Finished".equalsIgnoreCase(migration.state) && !"Stopped".equalsIgnoreCase(migration.state)) {
+                return;
+            }
+            if ("Success".equalsIgnoreCase(migration.result) || "Warning".equalsIgnoreCase(migration.result)) {
+                state.addProperty("phase", "moving");
+                state.remove("error");
+                quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore: Veeam copied the disks off the backup; moving them to their storage");
+            } else {
+                state.addProperty("phase", "publishing");
+                throw new CloudRuntimeException("Veeam's copy of the disks off the backup ended " + migration.result + "; starting it again");
+            }
+            return;
+        }
+        moveRestoredDisks(vm, state);
+    }
+
+    private void moveRestoredDisks(final VMInstanceVO vm, final JsonObject state) {
+        Answer config = extensionsManager.getInstanceConfig(vm);
+        if (config == null || !config.getResult()) {
+            throw new CloudRuntimeException("No configuration snapshot of the instance: " + extensionError(config));
+        }
+        JsonObject snapshot = new JsonParser().parse(config.getDetails()).getAsJsonObject();
+        boolean running = "running".equals(snapshot.get("power").getAsString());
+        Map<String, String> volumes = new HashMap<>();
+        for (JsonElement disk : snapshot.getAsJsonArray("disks")) {
+            JsonObject d = disk.getAsJsonObject();
+            if (!d.get("storage").isJsonNull() && !d.get("volume").isJsonNull()) {
+                volumes.put(d.get("device").getAsString(), d.get("storage").getAsString() + ":" + d.get("volume").getAsString());
+            }
+        }
+        String staging = state.get("staging").getAsString();
+        JsonObject targets = state.getAsJsonObject("targets");
+        com.google.gson.JsonArray moved = state.has("moved") ? state.getAsJsonArray("moved") : new com.google.gson.JsonArray();
+        boolean waiting = false;
+        for (Map.Entry<String, JsonElement> target : targets.entrySet()) {
+            String device = target.getKey();
+            if (moved.contains(new com.google.gson.JsonPrimitive(device))) {
+                continue;
+            }
+            String volume = volumes.get(device);
+            if (volume != null && !volume.startsWith(staging + ":")) {
+                moved.add(device);
+                continue;
+            }
+            if ("tpmstate0".equals(device) && running) {
+                waiting = true;
+                continue;
+            }
+            Map<String, Object> parameters = new HashMap<>();
+            parameters.put("device", device);
+            parameters.put("volume", StringUtils.defaultString(volume));
+            parameters.put("storage", target.getValue().getAsString());
+            Answer answer = extensionsManager.changeInstanceDisk(vm, "movedisk", parameters);
+            String error = answer == null || !answer.getResult() ? extensionError(answer) : null;
+            if (error != null && error.contains("already on that storage")) {
+                moved.add(device);
+                continue;
+            }
+            if (error != null) {
+                if (!device.startsWith("efidisk") && !device.startsWith("tpmstate") && volume == null) {
+                    throw new CloudRuntimeException("Disk " + device + " is not in the instance's configuration");
+                }
+                if (device.startsWith("tpmstate") && error.contains("holds no disk")) {
+                    moved.add(device);
+                    continue;
+                }
+                throw new CloudRuntimeException("Moving disk " + device + " to " + target.getValue().getAsString() + " failed: " + error);
+            }
+            JsonObject result = new JsonParser().parse(answer.getDetails().substring(answer.getDetails().indexOf('{'))).getAsJsonObject();
+            recordMovedVolume(vm, device, result.get("volume").getAsString());
+            moved.add(device);
+            logger.info("Quick restore of {}: disk {} is on {} again", vm, device, target.getValue().getAsString());
+        }
+        state.add("moved", moved);
+        state.remove("error");
+        if (!waiting) {
+            state.addProperty("done", true);
+            quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore finished: every disk is on its own storage again");
+        } else if (!state.has("waitingTpm")) {
+            state.addProperty("waitingTpm", true);
+            quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore: the disks are on their own storage again; the TPM state moves the next time the instance is stopped");
+        }
+    }
+
+    /** Points the CloudStack volume in that provider slot at the disk's new volume (same storage pool, new image name). */
+    private void recordMovedVolume(final VMInstanceVO vm, final String device, final String path) {
+        for (com.cloud.storage.VolumeVO volume : volumeDao.findByInstance(vm.getId())) {
+            com.cloud.storage.VolumeDetailVO slot = volumeDetailsDao.findDetail(volume.getId(), "externalSlot");
+            if (slot != null && device.equals(slot.getValue()) && !path.equals(volume.getPath())) {
+                logger.info("Volume {} of {} is now {} (was {})", volume.getUuid(), vm, path, volume.getPath());
+                volume.setPath(path);
+                volumeDao.update(volume.getId(), volume);
+            }
+        }
+    }
+
+    private void quickRestoreEvent(final VMInstanceVO vm, final String level, final String description) {
+        ActionEventUtils.onCompletedActionEvent(User.UID_SYSTEM, vm.getAccountId(), level, EventTypes.EVENT_VM_BACKUP_RESTORE,
+                description, vm.getId(), ApiCommandResourceType.VirtualMachine.toString(), 0);
     }
 
     private void prepareForBackupRestoration(VirtualMachine vm) {
@@ -728,7 +1230,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
      */
     @Override
     public boolean isBackupScheduleManagedByProvider(final BackupOffering offering) {
-        if (offering == null || !getName().equals(offering.getProvider()) || !isRestEnabled(offering.getZoneId())) {
+        if (offering == null || !getName().equals(offering.getProvider()) || !isRestEnabled(offering.getZoneId())
+                || isTemplateOffering(offering)) {
             return false;
         }
         VbrRestClient.JobState state = restJobState(offering.getZoneId(), offering.getExternalId());
@@ -791,6 +1294,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             }
             restJobStates.put(zoneId, states);
             applyPendingMemberships(zoneId);
+            finishQuickRestores(zoneId);
             syncRestRestorePoints(zoneId);
         }
     }
@@ -880,6 +1384,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 VeeamValidateSSLSecurity,
                 VeeamApiRequestTimeout,
                 VeeamRestoreTimeout,
+                VeeamTemplatePrefix,
+                VeeamQuickRestoreStorage,
                 VeeamTaskPollInterval,
                 VeeamTaskPollMaxRetry,
                 VeeamEnterpriseManagerEnabled,
