@@ -221,6 +221,8 @@ public class ExternalPathPayloadProvisioner extends ManagerBase implements Exter
             case "revertsnapshot": return "restore_snapshot";
             case "deletesnapshot": return "delete_snapshot";
             case "status": case "getconfig": case "getipaddress": case "ListSnapshots": return "";
+            // Pool membership changes no guest configuration or power state, so it needs no lifecycle lease.
+            case "setpool": return "";
             default: throw new IllegalArgumentException("Native adoption does not support action: " + action);
         }
     }
