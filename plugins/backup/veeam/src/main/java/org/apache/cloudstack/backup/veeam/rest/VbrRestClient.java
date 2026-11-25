@@ -101,6 +101,7 @@ public class VbrRestClient {
     /** One machine in a Veeam backup. objectId is the hypervisor's own VM id (Proxmox SMBIOS UUID, Hyper-V GUID). */
     public static class BackupObject {
         public String id, objectId, name, platformName, backupId;
+        public int restorePointsCount;
     }
 
     public static class RestorePoint {
@@ -146,6 +147,7 @@ public class VbrRestClient {
             BackupObject o = new BackupObject();
             o.id = text(n, "id"); o.objectId = text(n, "objectId"); o.name = text(n, "name");
             o.platformName = text(n, "platformName"); o.backupId = text(n, "backupId");
+            o.restorePointsCount = n.path("restorePointsCount").asInt(0);
             objects.add(o);
         }
         return objects;

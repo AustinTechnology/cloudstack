@@ -61,6 +61,8 @@ public class VbrRestorePoints {
     }
 
     private final Map<Long, List<Backup.RestorePoint>> byInstance = new ConcurrentHashMap<>();
+    /** Instances Veeam reported without restore points in the previous cycle; an empty answer counts only when repeated. */
+    private final Set<Long> emptyLastCycle = ConcurrentHashMap.newKeySet();
 
     /** The last synced restore points, or null when this cycle could not read them (the framework then keeps its records). */
     public List<Backup.RestorePoint> get(long instanceId) {
@@ -73,11 +75,21 @@ public class VbrRestorePoints {
 
     public void sync(VbrRestClient client, Collection<Instance> instances) {
         Map<String, String> backupToJob = client.listBackupJobIds();
+        List<VbrRestClient.BackupObject> objects = client.listBackupObjects();
+        // Veeam 13.1 now and then answers /backups or /backupObjects with an empty list (HTTP 200). Taken at face value
+        // that would delete every backup record in CloudStack and re-create them next cycle: skip such a cycle.
+        if (backupToJob.isEmpty() || objects.isEmpty()) {
+            LOG.warn("Veeam returned {} backups and {} backup objects; keeping the restore points of the previous sync",
+                    backupToJob.size(), objects.size());
+            return;
+        }
         // Veeam lists a machine once per backup holding it (the job's and each copy's), under one object id.
         Map<String, Set<String>> objectIdsByUuid = new HashMap<>();
-        for (VbrRestClient.BackupObject o : client.listBackupObjects()) {
+        Map<String, Integer> pointsReported = new HashMap<>();
+        for (VbrRestClient.BackupObject o : objects) {
             if (o.objectId != null && o.id != null) {
                 objectIdsByUuid.computeIfAbsent(o.objectId.toLowerCase(Locale.ROOT), k -> new LinkedHashSet<>()).add(o.id);
+                pointsReported.merge(o.id, o.restorePointsCount, Math::max);
             }
         }
         Map<String, Map<String, VbrRestClient.BackupFile>> filesByBackup = new HashMap<>();
@@ -96,8 +108,13 @@ public class VbrRestorePoints {
             try {
                 List<Backup.RestorePoint> points = new ArrayList<>();
                 Set<String> seen = new HashSet<>();
+                boolean incomplete = false;
                 for (String objectId : objectIdsByUuid.getOrDefault(instance.uuid.toLowerCase(Locale.ROOT), Set.of())) {
-                    for (VbrRestClient.RestorePoint p : client.listRestorePoints(objectId)) {
+                    List<VbrRestClient.RestorePoint> listed = client.listRestorePoints(objectId);
+                    if (listed.isEmpty() && pointsReported.getOrDefault(objectId, 0) > 0) {
+                        incomplete = true;
+                    }
+                    for (VbrRestClient.RestorePoint p : listed) {
                         // A restore point names the job's backup (an object's own backupId is its per-machine chain).
                         if ((instance.jobId != null && !Objects.equals(instance.jobId, backupToJob.get(p.backupId))) || !seen.add(p.id)) {
                             continue;
@@ -106,6 +123,18 @@ public class VbrRestorePoints {
                         points.add(new Backup.RestorePoint(p.id, parse(p.creationTime), type(p.type),
                                 file == null ? 0L : file.backupSize, file == null ? 0L : file.dataSize));
                     }
+                }
+                if (incomplete) {
+                    LOG.warn("Veeam listed no restore points for a backup object of instance {} that reports some; keeping the previous sync", instance.id);
+                    continue;
+                }
+                if (points.isEmpty()) {
+                    if (emptyLastCycle.add(instance.id)) {
+                        // An empty answer is believed only when the next sync agrees: until then CloudStack keeps its records.
+                        continue;
+                    }
+                } else {
+                    emptyLastCycle.remove(instance.id);
                 }
                 byInstance.put(instance.id, points);
             } catch (RuntimeException e) {
