@@ -536,6 +536,9 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         if (isExternal(vm)) {
             VbrRestClient client = getRestClient(vm.getDataCenterId());
             VbrRestClient.Session session = null;
+            if (isDisabled(restJobState(vm.getDataCenterId(), vm.getBackupExternalId()))) {
+                throw new CloudRuntimeException("The Veeam job of this instance is disabled in Veeam");
+            }
             if (!usesPools(vm)) {
                 // Hyper-V: an incremental of this VM alone, once it has a full backup.
                 String uuid = getBackupUuid((VMInstanceVO) vm);
@@ -552,6 +555,9 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 // Veeam has no per-VM ad-hoc backup for Proxmox; run the instance's job (incremental). Instances
                 // sharing a job ask together when their CloudStack schedules fall due: one run serves them all.
                 for (VbrRestClient.JobState state : client.listJobStates()) {
+                    if (state.id.equals(vm.getBackupExternalId()) && isDisabled(state)) {
+                        throw new CloudRuntimeException("The Veeam job " + state.name + " of this instance is disabled in Veeam");
+                    }
                     if (state.id.equals(vm.getBackupExternalId()) && !"Stopped".equalsIgnoreCase(state.status)) {
                         logger.info("Veeam job {} for {} is already running ({}); not starting it again", state.name, vm, state.status);
                         return new Pair<>(true, null);
@@ -650,9 +656,14 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         return states == null || jobId == null ? null : states.get(jobId);
     }
 
+    private static boolean isDisabled(final VbrRestClient.JobState state) {
+        return state != null && "Disabled".equalsIgnoreCase(state.status);
+    }
+
     /**
      * A Veeam job with a schedule of its own runs the backups: CloudStack shows that schedule read-only. A job without
-     * one is run by CloudStack, on its schedules or Backup now. A job not seen yet counts as scheduled in Veeam, so
+     * one is run by CloudStack, on its schedules or Backup now. A disabled job is left to Veeam: CloudStack shows no
+     * schedule for it and neither schedules nor starts it. A job not seen yet counts as scheduled in Veeam, so
      * CloudStack never starts one on a schedule by mistake.
      */
     @Override
@@ -664,7 +675,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         if (state == null) {
             return !isEnterpriseManagerEnabled(offering.getZoneId());
         }
-        return StringUtils.isNotBlank(state.nextRun);
+        return isDisabled(state) || StringUtils.isNotBlank(state.nextRun);
     }
 
     /**
@@ -678,7 +689,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         if (state == null) {
             return null;
         }
-        if (StringUtils.isBlank(state.nextRun)) {
+        if (isDisabled(state) || StringUtils.isBlank(state.nextRun)) {
             return new ArrayList<>();
         }
         java.time.OffsetDateTime next = java.time.OffsetDateTime.parse(state.nextRun);
