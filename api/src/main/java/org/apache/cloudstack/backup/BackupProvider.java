@@ -153,6 +153,25 @@ public interface BackupProvider {
     Pair<Long, Long> getBackupStorageStats(Long zoneId);
 
     /**
+     * Whether the backup provider itself schedules the backups of instances with this offering (for example a backup
+     * job with its own schedule in the backup software). CloudStack then neither creates, deletes nor runs backup
+     * schedules for those instances: their schedule records are a read-only copy of {@link #listProviderBackupSchedules}.
+     */
+    default boolean isBackupScheduleManagedByProvider(BackupOffering offering) {
+        return false;
+    }
+
+    /**
+     * The provider's own schedule for an instance whose offering is {@link #isBackupScheduleManagedByProvider managed
+     * by the provider}, at most one per interval type. Only the interval type, schedule, timezone and maximum backups
+     * are used. Null when the provider cannot tell now: CloudStack then keeps the records it has. Called by the backup
+     * sync, outside database transactions.
+     */
+    default List<BackupSchedule> listProviderBackupSchedules(VirtualMachine vm) {
+        return java.util.Collections.emptyList();
+    }
+
+    /**
      * Gets the backup storage usage (Used, Total) from the plugin and stores it in db
      * @param zoneId the zone for which to return metrics
      */

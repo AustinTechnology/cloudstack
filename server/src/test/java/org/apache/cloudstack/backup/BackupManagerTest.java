@@ -2682,6 +2682,52 @@ public class BackupManagerTest {
         }
     }
 
+    @Test
+    public void testSyncProviderBackupSchedulesMirrorsTheProviderSchedule() {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        when(vm.getId()).thenReturn(7L);
+        when(vm.getBackupOfferingId()).thenReturn(1234L);
+        when(vm.getAccountId()).thenReturn(2L);
+        when(vm.getDomainId()).thenReturn(3L);
+        when(backupProvider.isBackupScheduleManagedByProvider(Mockito.any())).thenReturn(true);
+        BackupScheduleVO daily = new BackupScheduleVO(7L, DateUtil.IntervalType.DAILY, "00:19", "UTC", null, 0, null, 2L, 3L, false);
+        when(backupProvider.listProviderBackupSchedules(vm)).thenReturn(List.of(daily));
+        BackupScheduleVO oldDaily = new BackupScheduleVO(7L, DateUtil.IntervalType.DAILY, "00:22", "UTC", null, 0, null, 2L, 3L, false);
+        ReflectionTestUtils.setField(oldDaily, "id", 10L);
+        BackupScheduleVO oldWeekly = new BackupScheduleVO(7L, DateUtil.IntervalType.WEEKLY, "00:22:1", "UTC", null, 0, null, 2L, 3L, false);
+        ReflectionTestUtils.setField(oldWeekly, "id", 11L);
+        when(backupScheduleDao.listByVM(7L)).thenReturn(List.of(oldDaily, oldWeekly));
+
+        backupManager.syncProviderBackupSchedules(backupProvider, vm);
+
+        verify(backupScheduleDao).update(Mockito.eq(10L), Mockito.argThat(r -> "00:19".equals(r.getSchedule()) && r.getScheduledTimestamp() != null));
+        verify(backupScheduleDao).remove(11L);
+        verify(backupScheduleDao, Mockito.never()).persist(Mockito.any());
+
+        when(backupScheduleDao.listByVM(7L)).thenReturn(List.of());
+        backupManager.syncProviderBackupSchedules(backupProvider, vm);
+        verify(backupScheduleDao).persist(Mockito.argThat(r -> r.getVmId() == 7L && r.getScheduleType() == DateUtil.IntervalType.DAILY));
+    }
+
+    @Test
+    public void testProviderManagedSchedulesAreNotDeletedByUsers() {
+        BackupScheduleVO schedule = new BackupScheduleVO(7L, DateUtil.IntervalType.DAILY, "00:19", "UTC", null, 0, null, 2L, 3L, false);
+        ReflectionTestUtils.setField(schedule, "id", 10L);
+        when(backupScheduleDao.findById(10L)).thenReturn(schedule);
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        when(vm.getBackupOfferingId()).thenReturn(1234L);
+        when(vmInstanceDao.findById(7L)).thenReturn(vm);
+        BackupOfferingVO offering = backupOfferingDao.findById(1234L);
+        when(offering.getProvider()).thenReturn("testbackupprovider");
+        when(backupProvider.isBackupScheduleManagedByProvider(offering)).thenReturn(true);
+        DeleteBackupScheduleCmd cmd = Mockito.mock(DeleteBackupScheduleCmd.class);
+        when(cmd.getId()).thenReturn(10L);
+        Mockito.doNothing().when(backupManager).checkCallerAccessToBackupScheduleVm(7L);
+
+        Assert.assertThrows(InvalidParameterValueException.class, () -> backupManager.deleteBackupSchedule(cmd));
+        verify(backupScheduleDao, Mockito.never()).remove(10L);
+    }
+
     private BackupOfferingVO createMockOffering(Long id, String name) {
         BackupOfferingVO offering = Mockito.mock(BackupOfferingVO.class);
         when(offering.getId()).thenReturn(id);

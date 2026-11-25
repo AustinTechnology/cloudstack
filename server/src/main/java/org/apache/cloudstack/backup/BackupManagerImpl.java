@@ -840,6 +840,7 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         if (offering == null || !offering.isUserDrivenBackupAllowed()) {
             throw new CloudRuntimeException("The selected backup offering does not allow user-defined backup schedule");
         }
+        refuseIfScheduleManagedByProvider(vm);
 
         final int maxBackups = validateAndGetDefaultBackupRetentionIfRequired(cmd.getMaxBackups(), offering, vm);
 
@@ -987,10 +988,12 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
                 throw new InvalidParameterValueException("Could not find the requested backup schedule.");
             }
             checkCallerAccessToBackupScheduleVm(schedule.getVmId());
+            refuseIfScheduleManagedByProvider(vmInstanceDao.findById(schedule.getVmId()));
             return backupScheduleDao.remove(schedule.getId());
         }
 
         checkCallerAccessToBackupScheduleVm(vmId);
+        refuseIfScheduleManagedByProvider(vmInstanceDao.findById(vmId));
         return deleteAllVmBackupSchedules(vmId);
     }
 
@@ -1014,6 +1017,70 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
      * @param vmId The ID of the virtual machine whose backup schedules should be deleted
      * @return true if all backup schedules were successfully deleted, false if any deletion failed
      */
+    private boolean isScheduleManagedByProvider(BackupOffering offering) {
+        if (offering == null || StringUtils.isBlank(offering.getProvider())) {
+            return false;
+        }
+        BackupProvider provider;
+        try {
+            provider = getBackupProvider(offering.getProvider());
+        } catch (CloudRuntimeException e) {
+            return false;
+        }
+        return provider != null && provider.isBackupScheduleManagedByProvider(offering);
+    }
+
+    private void refuseIfScheduleManagedByProvider(VirtualMachine vm) {
+        if (vm == null || vm.getBackupOfferingId() == null) {
+            return;
+        }
+        BackupOffering offering = backupOfferingDao.findById(vm.getBackupOfferingId());
+        if (isScheduleManagedByProvider(offering)) {
+            throw new InvalidParameterValueException(String.format("The backups of this Instance are scheduled by the %s backup provider; "
+                    + "its schedule is shown here read-only and is changed in the backup provider", offering.getProvider()));
+        }
+    }
+
+    /**
+     * Keeps the schedule records of an instance whose backups the provider schedules equal to the provider's schedule:
+     * one record per interval type, never run by CloudStack.
+     */
+    protected void syncProviderBackupSchedules(BackupProvider provider, VMInstanceVO vm) {
+        BackupOffering offering = backupOfferingDao.findById(vm.getBackupOfferingId());
+        if (offering == null || !provider.isBackupScheduleManagedByProvider(offering)) {
+            return;
+        }
+        List<BackupSchedule> wanted = provider.listProviderBackupSchedules(vm);
+        if (wanted == null) {
+            return;
+        }
+        Map<DateUtil.IntervalType, BackupScheduleVO> existing = new HashMap<>();
+        for (BackupScheduleVO schedule : backupScheduleDao.listByVM(vm.getId())) {
+            if (existing.putIfAbsent(schedule.getScheduleType(), schedule) != null) {
+                backupScheduleDao.remove(schedule.getId());
+            }
+        }
+        for (BackupSchedule schedule : wanted) {
+            DateUtil.IntervalType type = schedule.getScheduleType();
+            Date next = DateUtil.getNextRunTime(type, schedule.getSchedule(), schedule.getTimezone(), null);
+            BackupScheduleVO record = existing.remove(type);
+            if (record == null) {
+                backupScheduleDao.persist(new BackupScheduleVO(vm.getId(), type, schedule.getSchedule(), schedule.getTimezone(), next,
+                        schedule.getMaxBackups(), null, vm.getAccountId(), vm.getDomainId(), false));
+            } else if (!Objects.equals(record.getSchedule(), schedule.getSchedule()) || !Objects.equals(record.getTimezone(), schedule.getTimezone())
+                    || record.getMaxBackups() != schedule.getMaxBackups()) {
+                record.setSchedule(schedule.getSchedule());
+                record.setTimezone(schedule.getTimezone());
+                record.setMaxBackups(schedule.getMaxBackups());
+                record.setScheduledTimestamp(next);
+                backupScheduleDao.update(record.getId(), record);
+            }
+        }
+        for (BackupScheduleVO stale : existing.values()) {
+            backupScheduleDao.remove(stale.getId());
+        }
+    }
+
     protected boolean deleteAllVmBackupSchedules(long vmId) {
         List<BackupScheduleVO> vmBackupSchedules = backupScheduleDao.listByVM(vmId);
         boolean success = true;
@@ -2211,6 +2278,10 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
             if (offering == null || !offering.isUserDrivenBackupAllowed()) {
                 continue;
             }
+            if (isScheduleManagedByProvider(offering)) {
+                // A read-only copy of the provider's own schedule: the provider runs these backups.
+                continue;
+            }
 
             if (isDisabled(vm.getDataCenterId())) {
                 continue;
@@ -2361,6 +2432,7 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
                      logger.debug(String.format("Trying to sync backups of VM [%s] using backup provider [%s].", vm, backupProvider.getName()));
                      // Sync out-of-band backups
                      syncBackups(backupProvider, vm);
+                     syncProviderBackupSchedules(backupProvider, vm);
                 } catch (final Exception e) {
                     logger.error("Failed to sync backup usage metrics and out-of-band backups of VM [{}] due to: [{}].", vm, e.getMessage(), e);
                 }
