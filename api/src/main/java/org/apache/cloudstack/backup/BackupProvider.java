@@ -172,6 +172,31 @@ public interface BackupProvider {
     }
 
     /**
+     * Whether, for an offering {@link #isBackupScheduleManagedByProvider managed by the provider}, CloudStack's schedule
+     * records are the provider's schedule: users create, change and delete them as usual, CloudStack never runs them, and
+     * the provider applies them to its own scheduler (told through {@link #backupSchedulesChanged}). The backup sync then
+     * leaves the records alone instead of copying {@link #listProviderBackupSchedules}.
+     */
+    default boolean canProviderApplyBackupSchedules(BackupOffering offering) {
+        return false;
+    }
+
+    /**
+     * Called before CloudStack records a schedule of this interval type for an instance whose offering
+     * {@link #canProviderApplyBackupSchedules lets the provider apply schedules}; throws when the provider cannot hold it
+     * (for example a second schedule where the provider keeps one per instance). Database reads only.
+     */
+    default void validateBackupSchedule(VirtualMachine vm, com.cloud.utils.DateUtil.IntervalType intervalType) {
+    }
+
+    /**
+     * CloudStack's schedule records of the instance changed (created, changed or deleted). Called right after the change
+     * from the API thread: record the work and make provider calls later, outside this call.
+     */
+    default void backupSchedulesChanged(VirtualMachine vm) {
+    }
+
+    /**
      * Gets the backup storage usage (Used, Total) from the plugin and stores it in db
      * @param zoneId the zone for which to return metrics
      */

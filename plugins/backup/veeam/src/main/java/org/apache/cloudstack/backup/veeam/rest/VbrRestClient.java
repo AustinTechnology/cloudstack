@@ -272,6 +272,17 @@ public class VbrRestClient {
         return s;
     }
 
+    /** The plug-in job whose description holds this text (an instance's UUID), or null. */
+    public JsonNode findProxmoxJobByDescription(String text) {
+        JsonNode page = send(new HttpGet(url(PROXMOX_PLUGIN + "/jobs", Map.of("limit", "1000", "offset", "0"))), null);
+        for (JsonNode job : page.path("results")) {
+            if (StringUtils.contains(text(job, "description"), text)) {
+                return job;
+            }
+        }
+        return null;
+    }
+
     /** The plug-in's jobs (with their full settings), or the one with this exact name; null when none has it. */
     public JsonNode findProxmoxJobByName(String name) {
         JsonNode page = send(new HttpGet(url(PROXMOX_PLUGIN + "/jobs", Map.of("limit", "1000", "offset", "0"))), null);
@@ -389,6 +400,33 @@ public class VbrRestClient {
         s.id = text(n, "id"); s.state = text(n, "state"); s.result = text(n, "result");
         s.message = "Success".equalsIgnoreCase(text(n, "status")) || "Running".equalsIgnoreCase(text(n, "status")) ? null : text(n, "status");
         return s;
+    }
+
+    // ---- Hyper-V Instant Recovery (public REST) ----
+
+    /** Starts Instant Recovery of a Hyper-V VM over itself, powered on; returns the mount (id, sessionId, state). */
+    public JsonNode startHyperVInstantRecovery(String restorePointId, String reason) {
+        ObjectNode body = MAPPER.createObjectNode().put("restorePointId", restorePointId).put("type", "OriginalLocation")
+                .put("powerUp", true).put("reason", reason);
+        body.putObject("secureRestore").put("antivirusScanEnabled", false);
+        return send(new HttpPost(url("/api/v1/restore/instantRecovery/hyperV/vm", null)), body.toString());
+    }
+
+    /** A Hyper-V Instant Recovery mount: state Mounting, Mounted, Dismounting or Failed; null once Veeam no longer lists it. */
+    public JsonNode getHyperVInstantRecovery(String mountId) {
+        try {
+            return send(new HttpGet(url("/api/v1/restore/instantRecovery/hyperV/vm/" + enc(mountId), null)), null);
+        } catch (CloudRuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("HTTP 404")) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /** Moves a Hyper-V Instant Recovery VM to production storage (its original location); Veeam then removes the mount. */
+    public void migrateHyperVInstantRecovery(String mountId) {
+        send(new HttpPost(url("/api/v1/restore/instantRecovery/hyperV/vm/" + enc(mountId) + "/migrate", null)), "{}");
     }
 
     // ---- Hyper-V jobs (public REST) ----

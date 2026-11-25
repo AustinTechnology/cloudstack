@@ -55,6 +55,7 @@ import com.cloud.dc.dao.VmwareDatacenterDao;
 import com.cloud.hypervisor.vmware.dao.VmwareDatacenterZoneMapDao;
 import com.cloud.storage.Volume;
 import com.cloud.storage.dao.VolumeDao;
+import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.utils.Pair;
 import com.cloud.utils.component.AdapterBase;
 import com.cloud.utils.exception.CloudRuntimeException;
@@ -90,6 +91,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     public static final String PVE_JOB_DETAIL = "veeam.proxmox.job";
     /** Instance detail: a quick restore (Veeam Instant Recovery) that is still being finished, as JSON. */
     public static final String QUICK_RESTORE_DETAIL = "veeam.quickrestore";
+    /** Instance detail: its CloudStack schedules changed and are still to be written to its Veeam job ("pending"). */
+    public static final String SCHEDULE_DETAIL = "veeam.schedule";
     private static final Set<String> REST_JOB_TYPES = Set.of("ProxmoxBackupJob", "HyperVBackup");
     private static final String UUID_PATTERN = "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
 
@@ -157,9 +160,10 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                     + "of the job, which CloudStack schedules and starts. Empty turns templates off.", true, ConfigKey.Scope.Zone);
 
     private ConfigKey<String> VeeamQuickRestoreStorage = new ConfigKey<>("Advanced", String.class,
-            "backup.plugin.veeam.proxmox.quickrestore.storage", "local",
-            "The Proxmox storage (directory or NFS, holding qcow2) a quick restore runs the instance's disks from while "
-                    + "Veeam copies them off the backup; afterwards they move back to their own storage.", true, ConfigKey.Scope.Zone);
+            "backup.plugin.veeam.proxmox.quickrestore.storage", "",
+            "The Proxmox storage a quick restore runs the instance's disks from while Veeam copies them off the backup: shared "
+                    + "storage holding qcow2 on every node (NFS, or a directory on a shared file system). Afterwards the disks move "
+                    + "back to their own storage. Empty turns quick restore of Proxmox instances off.", true, ConfigKey.Scope.Zone);
 
     @Inject
     private ExtensionsManager extensionsManager;
@@ -272,10 +276,21 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         return own != null && StringUtils.isNotBlank(own.getValue()) ? own.getValue() : vm.getBackupExternalId();
     }
 
-    /** "&lt;name&gt; (&lt;first 8 of the instance UUID&gt;)", within Veeam's 40 characters. */
-    private static String instanceJobName(final VirtualMachine vm) {
+    /**
+     * "CS: &lt;domain&gt; - &lt;instance name&gt;", within Veeam's 40 characters: says which customer the job bills to
+     * (VSPC assigns jobs to companies) and which instance it protects. The job itself is found by the instance UUID
+     * in its description, so names may repeat and may change with the instance or domain.
+     */
+    protected String instanceJobName(final VirtualMachine vm) {
+        com.cloud.domain.DomainVO domain = domainDao.findById(vm.getDomainId());
         String name = StringUtils.defaultIfBlank(vm.getHostName(), vm.getInstanceName());
-        return StringUtils.left(name, 29) + " (" + vm.getUuid().substring(0, 8) + ")";
+        String customer = StringUtils.left(domain == null ? "?" : domain.getName(), 16);
+        return StringUtils.left("CS: " + customer + " - " + name, 40);
+    }
+
+    private static String instanceJobDescription(final VirtualMachine vm, final String template) {
+        return String.format("CloudStack instance %s (%s), from %s. Made, scheduled and deleted by CloudStack.", vm.getUuid(),
+                vm.getHostName(), template);
     }
 
     private String proxmoxPoolFor(final VirtualMachine vm) {
@@ -411,8 +426,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         VbrRestClient client = getRestClient(vm.getDataCenterId());
         VbrRestClient.JobState template = restJobState(vm.getDataCenterId(), offering.getExternalId());
         String name = instanceJobName(vm);
-        String description = String.format("CloudStack instance %s (%s), from %s. Made and deleted by CloudStack.",
-                vm.getHostName(), vm.getUuid(), template.name);
+        String description = instanceJobDescription(vm, template.name);
         String publicId = null;
         if (usesPools(vm)) {
             String uuid = requireBackupUuid(vm);
@@ -420,7 +434,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             if (vmid == null || StringUtils.isBlank(vmid.getValue())) {
                 throw new CloudRuntimeException("The instance has no Proxmox VMID recorded");
             }
-            com.fasterxml.jackson.databind.JsonNode job = client.findProxmoxJobByName(name);
+            com.fasterxml.jackson.databind.JsonNode job = client.findProxmoxJobByDescription(vm.getUuid());
             String pveId;
             if (job == null) {
                 com.fasterxml.jackson.databind.node.ObjectNode object = client.findProxmoxVm(uuid, vmid.getValue());
@@ -438,13 +452,13 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 settings.put("description", description);
                 settings.putObject("includes").putArray("objects").add(object);
                 settings.putObject("excludes").putArray("objects");
-                settings.with("scheduleSettings").put("enabled", false);
                 client.putProxmoxJobSettings(pveId, settings);
                 client.enableProxmoxJob(pveId);
                 seedSchedule(vm, scheduleOfProxmoxJob(templateJob.path("settings").path("scheduleSettings")));
                 logger.info("Created Veeam job {} for {} from template {}", name, vm, template.name);
             } else {
                 pveId = job.path("id").asText();
+                name = job.path("name").asText();
             }
             vmInstanceDetailsDao.addDetail(vm.getId(), PVE_JOB_DETAIL, pveId, false);
             for (VbrRestClient.JobState state : client.listJobStates()) {
@@ -475,7 +489,6 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 com.fasterxml.jackson.databind.node.ObjectNode machines = job.with("virtualMachines");
                 machines.putArray("includes").add(object);
                 machines.with("excludes").putArray("vms");
-                job.with("schedule").put("runAutomatically", false);
                 client.putJob(publicId, job);
                 client.enableJob(publicId);
                 seedSchedule(vm, scheduleOfHyperVJob(templateSchedule));
@@ -520,7 +533,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             }
             return new Pair<>(com.cloud.utils.DateUtil.IntervalType.DAILY, String.format("%s:%s", time[1], time[0]));
         }
-        if ("Monthly".equals(type) && "Day".equals(schedule.path("monthly").path("configuredWeekOrDay").asText())) {
+        if ("Monthly".equals(type) && "DayOfMonth".equals(schedule.path("monthly").path("configuredWeekOrDay").asText())) {
             String[] time = schedule.path("monthly").path("startTime").asText("").split(":");
             if (time.length >= 2) {
                 return new Pair<>(com.cloud.utils.DateUtil.IntervalType.MONTHLY,
@@ -532,6 +545,192 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             return new Pair<>(com.cloud.utils.DateUtil.IntervalType.HOURLY, String.valueOf(schedule.path("periodic").path("startTimeWithinAnHour").asInt(0)));
         }
         return null;
+    }
+
+    /** The Veeam server's UTC offset, from any scheduled job's next run (Veeam schedules jobs in its local time). */
+    private java.time.ZoneOffset vbrOffset(final Long zoneId) {
+        Map<String, VbrRestClient.JobState> states = restJobStates.get(zoneId);
+        for (VbrRestClient.JobState state : states == null ? new ArrayList<VbrRestClient.JobState>() : states.values()) {
+            if (StringUtils.isNotBlank(state.nextRun)) {
+                return java.time.OffsetDateTime.parse(state.nextRun).getOffset();
+            }
+        }
+        throw new CloudRuntimeException("No scheduled Veeam job tells the Veeam server's time zone yet");
+    }
+
+    /** When a CloudStack schedule next runs, in the Veeam server's local time. */
+    private java.time.OffsetDateTime nextRunAtVbr(final BackupSchedule schedule, final java.time.ZoneOffset offset) {
+        java.util.Date next = com.cloud.utils.DateUtil.getNextRunTime(schedule.getScheduleType(), schedule.getSchedule(), schedule.getTimezone(), null);
+        return next.toInstant().atOffset(offset);
+    }
+
+    private static String dayName(final java.time.DayOfWeek day) {
+        return day.getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.ENGLISH);
+    }
+
+    /** Writes one CloudStack schedule (or none) into a Proxmox plug-in job's scheduleSettings. */
+    protected void writeProxmoxSchedule(final com.fasterxml.jackson.databind.node.ObjectNode settings, final BackupSchedule schedule,
+            final java.time.ZoneOffset offset) {
+        com.fasterxml.jackson.databind.node.ObjectNode s = settings.with("scheduleSettings");
+        if (schedule == null) {
+            s.put("enabled", false);
+            return;
+        }
+        java.time.OffsetDateTime at = nextRunAtVbr(schedule, offset);
+        String time = String.format("%02d:%02d", at.getHour(), at.getMinute());
+        s.put("enabled", true);
+        switch (schedule.getScheduleType()) {
+            case HOURLY:
+                s.put("type", "Periodic");
+                s.with("periodic").put("mode", "EveryHour").put("interval", 1).put("startTimeWithinAnHour", at.getMinute());
+                break;
+            case DAILY:
+                s.put("type", "Weekly");
+                com.fasterxml.jackson.databind.node.ObjectNode daily = s.with("weekly").put("startTime", time).put("configuredDays", "EveryDay");
+                com.fasterxml.jackson.databind.node.ArrayNode all = daily.putArray("selectedDays");
+                for (java.time.DayOfWeek d : java.time.DayOfWeek.values()) {
+                    all.add(dayName(d));
+                }
+                break;
+            case WEEKLY:
+                s.put("type", "Weekly");
+                s.with("weekly").put("startTime", time).put("configuredDays", "SelectedDays").putArray("selectedDays").add(dayName(at.getDayOfWeek()));
+                break;
+            case MONTHLY:
+                s.put("type", "Monthly");
+                com.fasterxml.jackson.databind.node.ObjectNode monthly = s.with("monthly").put("startTime", time)
+                        .put("configuredWeekOrDay", "DayOfMonth").put("dayOfMonth", at.getDayOfMonth());
+                com.fasterxml.jackson.databind.node.ArrayNode months = monthly.putArray("months");
+                for (java.time.Month m : java.time.Month.values()) {
+                    months.add(m.getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.ENGLISH));
+                }
+                break;
+            default:
+                throw new CloudRuntimeException("Veeam cannot run a " + schedule.getScheduleType() + " schedule");
+        }
+    }
+
+    /** Writes one CloudStack schedule (or none) into a Hyper-V job's schedule (public REST model). */
+    protected void writeHyperVSchedule(final com.fasterxml.jackson.databind.node.ObjectNode job, final BackupSchedule schedule,
+            final java.time.ZoneOffset offset) {
+        com.fasterxml.jackson.databind.node.ObjectNode s = job.with("schedule");
+        s.with("daily").put("isEnabled", false);
+        s.with("monthly").put("isEnabled", false);
+        s.with("periodically").put("isEnabled", false);
+        if (schedule == null) {
+            s.put("runAutomatically", false);
+            return;
+        }
+        java.time.OffsetDateTime at = nextRunAtVbr(schedule, offset);
+        String time = String.format("%02d:%02d", at.getHour(), at.getMinute());
+        s.put("runAutomatically", true);
+        switch (schedule.getScheduleType()) {
+            case HOURLY:
+                s.with("periodically").put("isEnabled", true).put("periodicallyKind", "Hours").put("frequency", 1).put("startTimeWithinAnHour", at.getMinute());
+                break;
+            case DAILY:
+                s.with("daily").put("isEnabled", true).put("localTime", time).put("dailyKind", "Everyday");
+                break;
+            case WEEKLY:
+                com.fasterxml.jackson.databind.node.ObjectNode weekly = s.with("daily").put("isEnabled", true).put("localTime", time).put("dailyKind", "SelectedDays");
+                weekly.putArray("days").add(dayName(at.getDayOfWeek()));
+                break;
+            case MONTHLY:
+                com.fasterxml.jackson.databind.node.ObjectNode monthly = s.with("monthly").put("isEnabled", true).put("localTime", time)
+                        .put("dayNumberInMonth", "OnDay").put("dayOfMonth", at.getDayOfMonth());
+                com.fasterxml.jackson.databind.node.ArrayNode months = monthly.putArray("months");
+                for (java.time.Month m : java.time.Month.values()) {
+                    months.add(m.getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.ENGLISH));
+                }
+                break;
+            default:
+                throw new CloudRuntimeException("Veeam cannot run a " + schedule.getScheduleType() + " schedule");
+        }
+    }
+
+    /**
+     * Keeps instances' own Veeam jobs as CloudStack has them: the job name (CS: domain - instance) and, after CloudStack's
+     * schedules changed, the job's Veeam schedule. One step per instance per backup sync; outside transactions.
+     */
+    private void reconcileInstanceJobs(final Long zoneId) {
+        for (VMInstanceDetailVO own : vmInstanceDetailsDao.findDetails(VM_JOB_DETAIL)) {
+            VMInstanceVO vm = vmInstanceDao.findById(own.getResourceId());
+            if (vm == null || !zoneId.equals(vm.getDataCenterId()) || vm.getBackupOfferingId() == null) {
+                continue;
+            }
+            VMInstanceDetailVO pending = vmInstanceDetailsDao.findDetail(vm.getId(), SCHEDULE_DETAIL);
+            VbrRestClient.JobState state = restJobState(zoneId, own.getValue());
+            if (pending == null && (state == null || instanceJobName(vm).equals(state.name))) {
+                continue;
+            }
+            try {
+                String outcome = applyInstanceJob(vm, own.getValue());
+                vmInstanceDetailsDao.removeDetail(vm.getId(), SCHEDULE_DETAIL);
+                logger.info("Veeam job of {}: {}", vm, outcome);
+                if (pending != null) {
+                    ActionEventUtils.onActionEvent(User.UID_SYSTEM, vm.getAccountId(), vm.getDomainId(), EventTypes.EVENT_VM_BACKUP_SCHEDULE_CONFIGURE,
+                            "Veeam: " + outcome, vm.getId(), ApiCommandResourceType.VirtualMachine.toString());
+                }
+            } catch (RuntimeException e) {
+                logger.warn("Updating the Veeam job of {} failed: {}", vm, e.getMessage());
+                if (pending != null && !"failed".equals(pending.getValue())) {
+                    vmInstanceDetailsDao.addDetail(vm.getId(), SCHEDULE_DETAIL, "failed", false);
+                    ActionEventUtils.onCompletedActionEvent(User.UID_SYSTEM, vm.getAccountId(), EventVO.LEVEL_ERROR, EventTypes.EVENT_VM_BACKUP_SCHEDULE_CONFIGURE,
+                            "Writing the backup schedule to Veeam failed (retried each backup sync): " + e.getMessage(), vm.getId(),
+                            ApiCommandResourceType.VirtualMachine.toString(), 0);
+                }
+            }
+        }
+    }
+
+    private String applyInstanceJob(final VMInstanceVO vm, final String publicId) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        List<BackupScheduleVO> schedules = backupScheduleDao.listByVM(vm.getId());
+        BackupSchedule schedule = schedules.isEmpty() ? null : schedules.get(0);
+        java.time.ZoneOffset offset = vbrOffset(vm.getDataCenterId());
+        BackupOffering offering = backupOfferingDao.findById(vm.getBackupOfferingId());
+        VbrRestClient.JobState template = offering == null ? null : restJobState(vm.getDataCenterId(), offering.getExternalId());
+        String name = instanceJobName(vm);
+        String description = instanceJobDescription(vm, template == null ? "its template" : template.name);
+        VMInstanceDetailVO pveId = vmInstanceDetailsDao.findDetail(vm.getId(), PVE_JOB_DETAIL);
+        if (pveId != null) {
+            com.fasterxml.jackson.databind.node.ObjectNode settings = client.getProxmoxJobSettings(pveId.getValue());
+            settings.put("name", name);
+            settings.put("description", description);
+            writeProxmoxSchedule(settings, schedule, offset);
+            client.putProxmoxJobSettings(pveId.getValue(), settings);
+        } else {
+            com.fasterxml.jackson.databind.node.ObjectNode job = (com.fasterxml.jackson.databind.node.ObjectNode) client.getJob(publicId);
+            job.put("name", name);
+            job.put("description", description);
+            writeHyperVSchedule(job, schedule, offset);
+            client.putJob(publicId, job);
+        }
+        return schedule == null ? name + " has no schedule in Veeam (backups run only on Backup now)"
+                : String.format("%s runs %s at %s (%s) in Veeam", name, schedule.getScheduleType(), schedule.getSchedule(), schedule.getTimezone());
+    }
+
+    @Override
+    public boolean canProviderApplyBackupSchedules(final BackupOffering offering) {
+        return isTemplateOffering(offering);
+    }
+
+    /** A Veeam job runs one schedule: an instance with its own job takes one CloudStack schedule. */
+    @Override
+    public void validateBackupSchedule(final VirtualMachine vm, final com.cloud.utils.DateUtil.IntervalType intervalType) {
+        for (BackupScheduleVO existing : backupScheduleDao.listByVM(vm.getId())) {
+            if (existing.getScheduleType() != intervalType) {
+                throw new InvalidParameterValueException(String.format("Veeam runs one schedule per instance; this instance has a %s schedule. "
+                        + "Change that schedule, or delete it first", existing.getScheduleType()));
+            }
+        }
+    }
+
+    @Override
+    public void backupSchedulesChanged(final VirtualMachine vm) {
+        if (vmInstanceDetailsDao.findDetail(vm.getId(), VM_JOB_DETAIL) != null || vmInstanceDetailsDao.findDetail(vm.getId(), MEMBERSHIP_DETAIL) != null) {
+            vmInstanceDetailsDao.addDetail(vm.getId(), SCHEDULE_DETAIL, "pending", false);
+        }
     }
 
     /** One CloudStack schedule from a Hyper-V job schedule (daily only), or null. */
@@ -859,10 +1058,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             throw new CloudRuntimeException("A quick restore of this instance is still being finished; restore it again once that is done");
         }
         if (quick) {
-            if (!proxmox) {
-                throw new CloudRuntimeException("Quick restore is supported for Proxmox instances only; restore without it");
-            }
-            return startQuickRestore(vm, backup, client, reason);
+            return proxmox ? startQuickRestore(vm, backup, client, reason) : startHyperVQuickRestore(vm, backup, client, reason);
         }
         VbrRestClient.Session session;
         if (proxmox) {
@@ -1056,6 +1252,77 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         }
     }
 
+    /**
+     * Quick restore of a stopped Hyper-V instance through Veeam Instant Recovery to its original location: the VM runs from
+     * the backup (Veeam's vPower) and starts; the backup sync then has Veeam move it to production storage, after which
+     * Veeam removes the mount.
+     */
+    private boolean startHyperVQuickRestore(final VMInstanceVO vm, final Backup backup, final VbrRestClient client, final String reason) {
+        com.fasterxml.jackson.databind.JsonNode mount = client.startHyperVInstantRecovery(backup.getExternalId(), reason);
+        String mountId = mount.path("id").asText();
+        JsonObject state = new JsonObject();
+        state.addProperty("hyperv", mountId);
+        state.addProperty("session", mount.path("sessionId").asText());
+        state.addProperty("phase", "publishing");
+        vmInstanceDetailsDao.addDetail(vm.getId(), QUICK_RESTORE_DETAIL, state.toString(), false);
+        logger.info("Veeam Instant Recovery of {} from restore point {} (backup {}): mount {}", vm, backup.getExternalId(), backup.getUuid(), mountId);
+        long deadline = System.currentTimeMillis() + VeeamRestoreTimeout.valueIn(vm.getDataCenterId()) * 1000L;
+        while (true) {
+            com.fasterxml.jackson.databind.JsonNode now = client.getHyperVInstantRecovery(mountId);
+            String mountState = now == null ? "Gone" : now.path("state").asText();
+            if ("Mounted".equals(mountState)) {
+                return true;
+            }
+            if ("Failed".equals(mountState) || "Gone".equals(mountState) || "Dismounting".equals(mountState)) {
+                vmInstanceDetailsDao.removeDetail(vm.getId(), QUICK_RESTORE_DETAIL);
+                throw new CloudRuntimeException(String.format("Veeam Instant Recovery mount %s is %s: %s", mountId, mountState,
+                        now == null ? "see the session in Veeam" : now.path("errorMessage").asText("see the session in Veeam")));
+            }
+            if (System.currentTimeMillis() > deadline) {
+                throw new CloudRuntimeException(String.format("Veeam Instant Recovery mount %s is still %s after %ss; the backup sync keeps following it",
+                        mountId, mountState, VeeamRestoreTimeout.valueIn(vm.getDataCenterId())));
+            }
+            try {
+                Thread.sleep(15000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CloudRuntimeException("Interrupted while waiting for Veeam Instant Recovery mount " + mountId);
+            }
+        }
+    }
+
+    private void hyperVQuickRestoreStep(final VMInstanceVO vm, final JsonObject state) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        String mountId = state.get("hyperv").getAsString();
+        com.fasterxml.jackson.databind.JsonNode mount = client.getHyperVInstantRecovery(mountId);
+        String mountState = mount == null ? "Gone" : mount.path("state").asText();
+        if ("publishing".equals(state.get("phase").getAsString())) {
+            if ("Mounted".equals(mountState)) {
+                client.migrateHyperVInstantRecovery(mountId);
+                state.addProperty("phase", "migrating");
+                state.remove("error");
+                quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore: the instance runs from its backup; Veeam is moving it to production storage");
+            } else if (!"Mounting".equals(mountState)) {
+                state.addProperty("done", true);
+                quickRestoreEvent(vm, EventVO.LEVEL_ERROR, "Quick restore: Veeam Instant Recovery mount " + mountId + " is " + mountState
+                        + " before the instance was moved to production storage; check the instance in Hyper-V");
+            }
+            return;
+        }
+        if ("Gone".equals(mountState)) {
+            VbrRestClient.Session session = client.getSession(state.get("session").getAsString());
+            state.addProperty("done", true);
+            if ("Success".equalsIgnoreCase(session.result) || "Warning".equalsIgnoreCase(session.result)) {
+                quickRestoreEvent(vm, EventVO.LEVEL_INFO, "Quick restore finished: the instance is on production storage");
+            } else {
+                quickRestoreEvent(vm, EventVO.LEVEL_ERROR, "Quick restore: moving the instance to production storage ended " + session.result
+                        + "; check the session in Veeam");
+            }
+        } else if ("Failed".equals(mountState)) {
+            throw new CloudRuntimeException("Veeam could not move the instance to production storage: " + mount.path("errorMessage").asText());
+        }
+    }
+
     /** Veeam's id of the Proxmox node the instance is on now (the restore point's node when it has not moved). */
     private String proxmoxNodeIdOf(final VMInstanceVO vm, final VbrRestClient client, final com.fasterxml.jackson.databind.JsonNode meta) {
         Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
@@ -1095,7 +1362,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             JsonObject state = new JsonParser().parse(detail.getValue()).getAsJsonObject();
             String before = state.toString();
             try {
-                quickRestoreStep(vm, state);
+                if (state.has("hyperv")) {
+                    hyperVQuickRestoreStep(vm, state);
+                } else {
+                    quickRestoreStep(vm, state);
+                }
             } catch (RuntimeException e) {
                 logger.warn("Quick restore of {} ({}): {}", vm, state.get("phase").getAsString(), e.getMessage());
                 if (!state.has("error")) {
@@ -1296,9 +1567,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
      */
     @Override
     public boolean isBackupScheduleManagedByProvider(final BackupOffering offering) {
-        if (offering == null || !getName().equals(offering.getProvider()) || !isRestEnabled(offering.getZoneId())
-                || isTemplateOffering(offering)) {
+        if (offering == null || !getName().equals(offering.getProvider()) || !isRestEnabled(offering.getZoneId())) {
             return false;
+        }
+        if (isTemplateOffering(offering)) {
+            return true;
         }
         VbrRestClient.JobState state = restJobState(offering.getZoneId(), offering.getExternalId());
         if (state == null) {
@@ -1360,6 +1633,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             }
             restJobStates.put(zoneId, states);
             applyPendingMemberships(zoneId);
+            reconcileInstanceJobs(zoneId);
             finishQuickRestores(zoneId);
             syncRestRestorePoints(zoneId);
         }

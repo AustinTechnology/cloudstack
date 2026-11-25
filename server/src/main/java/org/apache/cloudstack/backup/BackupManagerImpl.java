@@ -841,6 +841,9 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
             throw new CloudRuntimeException("The selected backup offering does not allow user-defined backup schedule");
         }
         refuseIfScheduleManagedByProvider(vm);
+        if (isScheduleAppliedByProvider(offering)) {
+            getBackupProvider(offering.getProvider()).validateBackupSchedule(vm, intervalType);
+        }
 
         final int maxBackups = validateAndGetDefaultBackupRetentionIfRequired(cmd.getMaxBackups(), offering, vm);
 
@@ -866,8 +869,10 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
 
         final BackupScheduleVO schedule = backupScheduleDao.findByVMAndIntervalType(vmId, intervalType);
         if (schedule == null) {
-            return backupScheduleDao.persist(new BackupScheduleVO(vmId, intervalType, scheduleString, timezoneId, nextDateTime, maxBackups, cmd.getQuiesceVM(), vm.getAccountId(),
+            BackupScheduleVO created = backupScheduleDao.persist(new BackupScheduleVO(vmId, intervalType, scheduleString, timezoneId, nextDateTime, maxBackups, cmd.getQuiesceVM(), vm.getAccountId(),
                     vm.getDomainId(), isolated));
+            notifyProviderOfScheduleChange(vm);
+            return created;
         }
 
         schedule.setScheduleType((short) intervalType.ordinal());
@@ -878,6 +883,7 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         schedule.setQuiesceVM(cmd.getQuiesceVM());
         schedule.setIsolated(isolated);
         backupScheduleDao.update(schedule.getId(), schedule);
+        notifyProviderOfScheduleChange(vm);
         return backupScheduleDao.findById(schedule.getId());
     }
 
@@ -989,12 +995,16 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
             }
             checkCallerAccessToBackupScheduleVm(schedule.getVmId());
             refuseIfScheduleManagedByProvider(vmInstanceDao.findById(schedule.getVmId()));
-            return backupScheduleDao.remove(schedule.getId());
+            boolean removed = backupScheduleDao.remove(schedule.getId());
+            notifyProviderOfScheduleChange(vmInstanceDao.findById(schedule.getVmId()));
+            return removed;
         }
 
         checkCallerAccessToBackupScheduleVm(vmId);
         refuseIfScheduleManagedByProvider(vmInstanceDao.findById(vmId));
-        return deleteAllVmBackupSchedules(vmId);
+        boolean removed = deleteAllVmBackupSchedules(vmId);
+        notifyProviderOfScheduleChange(vmInstanceDao.findById(vmId));
+        return removed;
     }
 
     /**
@@ -1030,12 +1040,24 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         return provider != null && provider.isBackupScheduleManagedByProvider(offering);
     }
 
+    /** Whether CloudStack's schedule records are the provider's schedule, which the provider applies itself. */
+    private boolean isScheduleAppliedByProvider(BackupOffering offering) {
+        return isScheduleManagedByProvider(offering) && getBackupProvider(offering.getProvider()).canProviderApplyBackupSchedules(offering);
+    }
+
+    private void notifyProviderOfScheduleChange(VirtualMachine vm) {
+        BackupOffering offering = vm == null || vm.getBackupOfferingId() == null ? null : backupOfferingDao.findById(vm.getBackupOfferingId());
+        if (isScheduleAppliedByProvider(offering)) {
+            getBackupProvider(offering.getProvider()).backupSchedulesChanged(vm);
+        }
+    }
+
     private void refuseIfScheduleManagedByProvider(VirtualMachine vm) {
         if (vm == null || vm.getBackupOfferingId() == null) {
             return;
         }
         BackupOffering offering = backupOfferingDao.findById(vm.getBackupOfferingId());
-        if (isScheduleManagedByProvider(offering)) {
+        if (isScheduleManagedByProvider(offering) && !isScheduleAppliedByProvider(offering)) {
             throw new InvalidParameterValueException(String.format("The backups of this Instance are scheduled by the %s backup provider; "
                     + "its schedule is shown here read-only and is changed in the backup provider", offering.getProvider()));
         }
@@ -1047,7 +1069,7 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
      */
     protected void syncProviderBackupSchedules(BackupProvider provider, VMInstanceVO vm) {
         BackupOffering offering = backupOfferingDao.findById(vm.getBackupOfferingId());
-        if (offering == null || !provider.isBackupScheduleManagedByProvider(offering)) {
+        if (offering == null || !provider.isBackupScheduleManagedByProvider(offering) || provider.canProviderApplyBackupSchedules(offering)) {
             return;
         }
         List<BackupSchedule> wanted = provider.listProviderBackupSchedules(vm);

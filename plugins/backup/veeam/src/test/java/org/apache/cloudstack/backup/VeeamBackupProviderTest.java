@@ -138,8 +138,25 @@ public class VeeamBackupProviderTest {
         assertEquals(new com.cloud.utils.Pair<>(com.cloud.utils.DateUtil.IntervalType.DAILY, "05:22"), backupProvider.scheduleOfProxmoxJob(json.readTree(daily)));
         String weekly = "{\"enabled\":true,\"type\":\"Weekly\",\"weekly\":{\"startTime\":\"10:00\",\"configuredDays\":\"SelectedDays\",\"selectedDays\":[\"Saturday\"]}}";
         assertEquals(new com.cloud.utils.Pair<>(com.cloud.utils.DateUtil.IntervalType.WEEKLY, "00:10:7"), backupProvider.scheduleOfProxmoxJob(json.readTree(weekly)));
-        String monthly = "{\"enabled\":true,\"type\":\"Monthly\",\"monthly\":{\"startTime\":\"01:30\",\"configuredWeekOrDay\":\"Day\",\"dayOfMonth\":3}}";
+        String monthly = "{\"enabled\":true,\"type\":\"Monthly\",\"monthly\":{\"startTime\":\"01:30\",\"configuredWeekOrDay\":\"DayOfMonth\",\"dayOfMonth\":3}}";
         assertEquals(new com.cloud.utils.Pair<>(com.cloud.utils.DateUtil.IntervalType.MONTHLY, "30:01:3"), backupProvider.scheduleOfProxmoxJob(json.readTree(monthly)));
         assertEquals(null, backupProvider.scheduleOfProxmoxJob(json.readTree("{\"enabled\":false,\"type\":\"Weekly\"}")));
+    }
+
+    /** CloudStack schedules are written to Veeam in the Veeam server's local time. */
+    @Test
+    public void writeProxmoxScheduleConvertsToTheVeeamServersTime() {
+        com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
+        java.time.ZoneOffset awst = java.time.ZoneOffset.ofHours(8);
+        com.fasterxml.jackson.databind.node.ObjectNode settings = json.createObjectNode();
+        backupProvider.writeProxmoxSchedule(settings, new BackupScheduleVO(1L, com.cloud.utils.DateUtil.IntervalType.DAILY, "00:23", "GMT", null, 0, null, 1L, 1L, false), awst);
+        assertEquals("Weekly", settings.at("/scheduleSettings/type").asText());
+        assertEquals("07:00", settings.at("/scheduleSettings/weekly/startTime").asText());
+        assertEquals("EveryDay", settings.at("/scheduleSettings/weekly/configuredDays").asText());
+        backupProvider.writeProxmoxSchedule(settings, new BackupScheduleVO(1L, com.cloud.utils.DateUtil.IntervalType.WEEKLY, "30:01:2", "GMT+08:00", null, 0, null, 1L, 1L, false), awst);
+        assertEquals("01:30", settings.at("/scheduleSettings/weekly/startTime").asText());
+        assertEquals("[\"Monday\"]", settings.at("/scheduleSettings/weekly/selectedDays").toString());
+        backupProvider.writeProxmoxSchedule(settings, null, awst);
+        assertEquals(false, settings.at("/scheduleSettings/enabled").asBoolean());
     }
 }
