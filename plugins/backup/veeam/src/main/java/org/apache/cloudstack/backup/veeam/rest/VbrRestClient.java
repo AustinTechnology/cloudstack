@@ -56,6 +56,7 @@ import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.nio.TrustAllManager;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
  * Client for the Veeam Backup &amp; Replication REST API (v12+, tested with 1.3-rev2 / VBR 13.1).
@@ -226,6 +227,48 @@ public class VbrRestClient {
 
     public Session getSession(String sessionId) {
         return session(send(new HttpGet(url("/api/v1/sessions/" + enc(sessionId), null)), null));
+    }
+
+    /** Restores a Hyper-V VM over itself (original location), powered off. */
+    public Session restoreHyperVVmInPlace(String restorePointId, String reason) {
+        ObjectNode body = MAPPER.createObjectNode().put("restorePointId", restorePointId).put("type", "OriginalLocation")
+                .put("powerUp", false).put("reason", reason);
+        return session(send(new HttpPost(url("/api/v1/restore/vmRestore/hyperV", null)), body.toString()));
+    }
+
+    // ---- Veeam Plug-in for Proxmox VE ----
+    // The public REST API cannot restore Proxmox VMs. The plug-in's own API (the one the Veeam Web UI uses, behind
+    // the same token) can. It is not documented for third parties, so only the restore and its session are used.
+
+    /** The plug-in's id on every Veeam server (also the platformId of Proxmox backup objects). */
+    public static final String PROXMOX_PLUGIN = "/extension/01208ee8-47fe-4ea8-8727-5115874da1ad/api/v1";
+
+    /**
+     * Restores a Proxmox VM over itself (same VMID, disks and configuration as in the restore point), powered off.
+     * sourceVmId is "&lt;SMBIOS UUID&gt;:&lt;VMID&gt;"; restorePointId is the public REST API's restore point id.
+     */
+    public Session restoreProxmoxVmInPlace(String sourceVmId, String restorePointId, String reason) {
+        ObjectNode body = MAPPER.createObjectNode().put("sourceVmId", sourceVmId).put("restoreToOriginal", true)
+                .put("restorePointId", restorePointId).put("powerOnVmAfterRestore", false).put("reason", reason);
+        Session s = new Session();
+        s.id = text(send(new HttpPost(url(PROXMOX_PLUGIN + "/restorePoints/restore", null)), body.toString()), "sessionId");
+        if (StringUtils.isBlank(s.id)) {
+            throw new CloudRuntimeException("The Veeam Proxmox plug-in started no restore session");
+        }
+        return s;
+    }
+
+    /** A plug-in session: state Finished when done, result Success, Warning or Failed, message its last warning or error. */
+    public Session getProxmoxSession(String sessionId) {
+        JsonNode n = send(new HttpGet(url(PROXMOX_PLUGIN + "/sessions/" + enc(sessionId), null)), null);
+        Session s = new Session();
+        s.id = sessionId; s.state = text(n, "state"); s.result = text(n, "status");
+        for (JsonNode event : n.path("progressState").path("events")) {
+            if (!"Information".equalsIgnoreCase(text(event, "severity"))) {
+                s.message = text(event, "message");
+            }
+        }
+        return s;
     }
 
     // ---- transport ----

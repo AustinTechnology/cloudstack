@@ -23,6 +23,8 @@ import java.util.Map;
 
 import javax.inject.Inject;
 
+import org.apache.cloudstack.backup.Backup;
+import org.apache.cloudstack.backup.BackupProvider;
 import org.apache.cloudstack.framework.extensions.manager.ExtensionsManager;
 import org.apache.commons.collections.MapUtils;
 
@@ -33,11 +35,13 @@ import com.cloud.host.Host;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.hypervisor.HypervisorGuru;
 import com.cloud.hypervisor.HypervisorGuruBase;
+import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineManager;
 import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.VirtualMachineProfileImpl;
 import com.cloud.vm.dao.UserVmDao;
+import com.cloud.vm.dao.VMInstanceDao;
 
 public class ExternalHypervisorGuru extends HypervisorGuruBase implements HypervisorGuru {
 
@@ -45,6 +49,8 @@ public class ExternalHypervisorGuru extends HypervisorGuruBase implements Hyperv
     private VirtualMachineManager virtualMachineManager;
     @Inject
     private UserVmDao userVmDao;
+    @Inject
+    private VMInstanceDao vmInstanceDao;
     @Inject
     ExtensionsManager extensionsManager;
 
@@ -61,6 +67,20 @@ public class ExternalHypervisorGuru extends HypervisorGuruBase implements Hyperv
     public VirtualMachineTO implement(VirtualMachineProfile vm) {
         VirtualMachineTO to = toVirtualMachineTO(vm);
         return to;
+    }
+
+    /**
+     * Backup providers restore External instances over themselves (same instance at the provider), so there is
+     * nothing to import: the restored instance is the existing one, whose states the backup framework sets.
+     */
+    @Override
+    public VirtualMachine importVirtualMachineFromBackup(long zoneId, long domainId, long accountId, long userId,
+                                                         String vmInternalName, Backup backup, BackupProvider backupProvider) {
+        VirtualMachine vm = vmInstanceDao.findVMByInstanceName(vmInternalName);
+        if (vm == null || vm.getId() != backup.getVmId()) {
+            throw new CloudRuntimeException("Only an in-place restore of an existing External instance is supported");
+        }
+        return vm;
     }
 
     @Override

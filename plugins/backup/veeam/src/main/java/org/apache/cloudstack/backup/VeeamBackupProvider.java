@@ -608,7 +608,9 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     @Override
     public boolean restoreVMFromBackup(VirtualMachine vm, Backup backup, boolean quickRestore, Long hostId) {
-        requireNotExternal(vm, "Restoring");
+        if (isExternal(vm)) {
+            return restoreExternalInPlace(vmInstanceDao.findById(vm.getId()), backup);
+        }
         final String restorePointId = backup.getExternalId();
         try {
             return getClient(vm.getDataCenterId()).restoreFullVM(vm.getInstanceName(), restorePointId);
@@ -617,6 +619,64 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             prepareForBackupRestoration(vm);
             return getClient(vm.getDataCenterId()).restoreFullVM(vm.getInstanceName(), restorePointId);
         }
+    }
+
+    /**
+     * Restores a stopped External instance over itself, powered off: Proxmox through the Veeam plug-in (same VMID,
+     * SMBIOS UUID, disks and configuration as in the restore point), Hyper-V to its original location. Waits for the
+     * Veeam session, up to backup.plugin.veeam.restore.timeout. A Proxmox VM goes back into its backup pool after the
+     * restore, in case the restored configuration does not carry it.
+     */
+    private boolean restoreExternalInPlace(final VMInstanceVO vm, final Backup backup) {
+        VbrRestClient client = getRestClient(vm.getDataCenterId());
+        String reason = String.format("CloudStack restore of instance %s (%s) from backup %s", vm.getHostName(), vm.getUuid(), backup.getUuid());
+        boolean proxmox = usesPools(vm);
+        VbrRestClient.Session session;
+        if (proxmox) {
+            VMInstanceDetailVO vmid = vmInstanceDetailsDao.findDetail(vm.getId(), "proxmox_vmid");
+            if (vmid == null || StringUtils.isBlank(vmid.getValue())) {
+                throw new CloudRuntimeException("The instance has no Proxmox VMID recorded");
+            }
+            session = client.restoreProxmoxVmInPlace(requireBackupUuid(vm).toLowerCase() + ":" + vmid.getValue(), backup.getExternalId(), reason);
+        } else {
+            session = client.restoreHyperVVmInPlace(backup.getExternalId(), reason);
+        }
+        logger.info("Veeam is restoring {} from restore point {} (backup {}): session {}", vm, backup.getExternalId(), backup.getUuid(), session.id);
+
+        long deadline = System.currentTimeMillis() + VeeamRestoreTimeout.valueIn(vm.getDataCenterId()) * 1000L;
+        while (!"Finished".equalsIgnoreCase(session.state) && !"Stopped".equalsIgnoreCase(session.state)) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new CloudRuntimeException(String.format("The Veeam restore session %s is still running after %ss (backup.plugin.veeam.restore.timeout);"
+                        + " check it in Veeam before starting the instance", session.id, VeeamRestoreTimeout.valueIn(vm.getDataCenterId())));
+            }
+            try {
+                Thread.sleep(15000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CloudRuntimeException("Interrupted while waiting for Veeam restore session " + session.id);
+            }
+            try {
+                session = proxmox ? client.getProxmoxSession(session.id) : client.getSession(session.id);
+            } catch (CloudRuntimeException e) {
+                logger.debug("Veeam restore session {} not readable this time: {}", session.id, e.getMessage());
+            }
+        }
+        if (!"Success".equalsIgnoreCase(session.result) && !"Warning".equalsIgnoreCase(session.result)) {
+            throw new CloudRuntimeException(String.format("Veeam restore session %s ended %s: %s", session.id, session.result,
+                    StringUtils.defaultIfBlank(session.message, "see the session in Veeam")));
+        }
+        logger.info("Veeam restored {} from restore point {} ({}{})", vm, backup.getExternalId(), session.result,
+                session.message == null ? "" : ": " + session.message);
+
+        VMInstanceDetailVO pool = proxmox ? vmInstanceDetailsDao.findDetail(vm.getId(), POOL_DETAIL) : null;
+        if (pool != null) {
+            Answer answer = extensionsManager.setInstancePool(vm, pool.getValue(), false);
+            if (answer == null || !answer.getResult()) {
+                logger.warn("{} is restored but not back in Proxmox pool {} ({}); the backup sync retries", vm, pool.getValue(), extensionError(answer));
+                vmInstanceDetailsDao.addDetail(vm.getId(), MEMBERSHIP_DETAIL, "add", false);
+            }
+        }
+        return true;
     }
 
     private void prepareForBackupRestoration(VirtualMachine vm) {
