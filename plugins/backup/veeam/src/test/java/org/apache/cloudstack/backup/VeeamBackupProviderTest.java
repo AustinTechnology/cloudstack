@@ -172,4 +172,15 @@ public class VeeamBackupProviderTest {
         Mockito.when(vm.getHostName()).thenReturn("web01.cmco:prod");
         assertEquals("CS - CMCO-net-au - web01-cmco-prod", backupProvider.instanceJobName(vm));
     }
+
+    /** Schedule time zones are ids the CloudStack UI lists; Etc/GMT ids invert the sign. */
+    @Test
+    public void timezoneIdIsOneCloudStackKnows() {
+        org.springframework.test.util.ReflectionTestUtils.setField(backupProvider, "VeeamTimezone", new org.apache.cloudstack.framework.config.ConfigKey<>(
+                "Advanced", String.class, "backup.plugin.veeam.timezone.test", "", "", false));
+        assertEquals("Etc/GMT-8", backupProvider.timezoneId(1L, java.time.ZoneOffset.ofHours(8)));
+        assertEquals("Etc/GMT+5", backupProvider.timezoneId(1L, java.time.ZoneOffset.ofHours(-5)));
+        assertEquals("Etc/GMT", backupProvider.timezoneId(1L, java.time.ZoneOffset.UTC));
+        assertEquals("GMT+09:30", backupProvider.timezoneId(1L, java.time.ZoneOffset.ofHoursMinutes(9, 30)));
+    }
 }

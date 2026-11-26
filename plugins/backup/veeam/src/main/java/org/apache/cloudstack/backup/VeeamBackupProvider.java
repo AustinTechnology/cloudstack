@@ -170,6 +170,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                     + "storage holding qcow2 on every node (NFS, or a directory on a shared file system). Afterwards the disks move "
                     + "back to their own storage. Empty turns quick restore of Proxmox instances off.", true, ConfigKey.Scope.Zone);
 
+    private ConfigKey<String> VeeamTimezone = new ConfigKey<>("Advanced", String.class,
+            "backup.plugin.veeam.timezone", "",
+            "The Veeam server's time zone (for example Australia/Perth), used for the CloudStack schedules made from Veeam schedules. "
+                    + "Empty means a fixed offset taken from Veeam's next run times.", true, ConfigKey.Scope.Zone);
+
     private ConfigKey<String> VeeamCopyJob = new ConfigKey<>("Advanced", String.class,
             "backup.plugin.veeam.copy.job", "",
             "The name of the customer's Veeam backup copy job that copies its backups offsite. Offsite offerings (a template "
@@ -595,6 +600,23 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         return null;
     }
 
+    /**
+     * A time zone id CloudStack (and its UI list) knows for Veeam's local time: backup.plugin.veeam.timezone when set,
+     * else the fixed-offset Etc/GMT zone (whose sign is inverted: UTC+8 is Etc/GMT-8), else GMT+hh:mm for odd offsets.
+     */
+    protected String timezoneId(final Long zoneId, final java.time.ZoneOffset offset) {
+        String configured = StringUtils.trimToNull(VeeamTimezone.valueIn(zoneId));
+        if (configured != null) {
+            return configured;
+        }
+        int seconds = offset.getTotalSeconds();
+        if (seconds % 3600 != 0) {
+            return "GMT" + offset.getId();
+        }
+        int hours = seconds / 3600;
+        return hours == 0 ? "Etc/GMT" : "Etc/GMT" + (hours > 0 ? "-" + hours : "+" + (-hours));
+    }
+
     /** The Veeam server's UTC offset, from any scheduled job's next run (Veeam schedules jobs in its local time). */
     private java.time.ZoneOffset vbrOffset(final Long zoneId) {
         Map<String, VbrRestClient.JobState> states = restJobStates.get(zoneId);
@@ -799,12 +821,12 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         if (schedule == null || !backupScheduleDao.listByVM(vm.getId()).isEmpty()) {
             return;
         }
-        String timezone = "GMT";
+        String timezone = timezoneId(vm.getDataCenterId(), java.time.ZoneOffset.UTC);
         Map<String, VbrRestClient.JobState> states = restJobStates.get(vm.getDataCenterId());
         for (VbrRestClient.JobState state : states == null ? new ArrayList<VbrRestClient.JobState>() : states.values()) {
             if (StringUtils.isNotBlank(state.nextRun)) {
                 java.time.ZoneOffset offset = java.time.OffsetDateTime.parse(state.nextRun).getOffset();
-                timezone = "GMT" + (offset.getTotalSeconds() == 0 ? "" : offset.getId());
+                timezone = timezoneId(vm.getDataCenterId(), offset);
                 break;
             }
         }
@@ -1843,7 +1865,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             type = com.cloud.utils.DateUtil.IntervalType.DAILY;
             schedule = String.format("%02d:%02d", next.getMinute(), next.getHour());
         }
-        String timezone = "GMT" + (next.getOffset().getTotalSeconds() == 0 ? "" : next.getOffset().getId());
+        String timezone = timezoneId(vm.getDataCenterId(), next.getOffset());
         List<BackupSchedule> schedules = new ArrayList<>();
         schedules.add(new BackupScheduleVO(vm.getId(), type, schedule, timezone, null, 0, null, vm.getAccountId(), vm.getDomainId(), false));
         return schedules;
@@ -1962,6 +1984,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 VeeamRestoreTimeout,
                 VeeamTemplatePrefix,
                 VeeamQuickRestoreStorage,
+                VeeamTimezone,
                 VeeamCopyJob,
                 VeeamCopyRepository,
                 VspcUrl,
